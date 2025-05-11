@@ -1,0 +1,116 @@
+#!/usr/bin/env python
+"""
+Fine-tune Qwen-0.5B on FineWeb-Edu (sample-10BT) using Hugging Face Accelerate
+with FSDP + CPU-offload on a single RTX 3090.  About 12 GB GPU RAM at batch-2×1024.
+
+Usage:
+  accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py \
+      --output_dir ./qwen-0.5B-fineweb-edu \
+      --max_steps 5000               # stop after N steps (optional)
+"""
+
+import argparse, os, math, torch
+from functools import partial
+from datasets import load_dataset, IterableDataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, get_scheduler
+from torch.optim import AdamW
+from accelerate import Accelerator
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
+# ----------------------- CLI arguments ----------------------------------------
+parser = argparse.ArgumentParser()
+parser.add_argument("--model_name", default="Qwen/Qwen3-0.6B")
+parser.add_argument("--dataset_name", default="HuggingFaceFW/fineweb-edu")
+parser.add_argument("--subset",      default="sample-10BT")   # subset in HF repo
+parser.add_argument("--output_dir",  required=True)
+parser.add_argument("--seq_len",     type=int, default=1024)
+parser.add_argument("--batch_size",  type=int, default=2)
+parser.add_argument("--grad_accum",  type=int, default=8)
+parser.add_argument("--lr",          type=float, default=2e-5)
+parser.add_argument("--max_steps",   type=int, default=10_000)
+args = parser.parse_args()
+
+# ----------------------- Accelerator & precision ------------------------------
+accelerator = Accelerator()  # reads fsdp_single_gpu.yaml automatically
+device      = accelerator.device
+is_main     = accelerator.is_main_process
+
+# ----------------------- Tokenizer & model ------------------------------------
+tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=False, trust_remote_code=True)
+model     = AutoModelForCausalLM.from_pretrained(
+    args.model_name,
+    torch_dtype=torch.bfloat16 if accelerator.mixed_precision == "bf16" else torch.float16,
+    trust_remote_code=True,
+)
+model.gradient_checkpointing_enable()   # extra memory savings
+
+# ----------------------- Dataset streaming ------------------------------------
+def get_dataset():
+    ds = load_dataset(
+        args.dataset_name,
+        name=args.subset,
+        split="train",
+        streaming=True,   # no local download
+    )
+    return ds
+
+def tokenize_batch(examples, seq_len):
+    texts  = [ex["text"] for ex in examples]
+    tokens = tokenizer(
+        texts,
+        max_length=seq_len,
+        truncation=True,
+        padding="max_length",
+        return_tensors="pt",
+    )
+    tokens["labels"] = tokens["input_ids"].clone()
+    return tokens
+
+raw_dataset   = get_dataset()                       # IterableDataset
+collate_fn    = partial(tokenize_batch, seq_len=args.seq_len)
+dataloader    = DataLoader(raw_dataset, batch_size=args.batch_size,
+                            collate_fn=collate_fn)
+
+# ----------------------- Optimizer & scheduler --------------------------------
+optimizer     = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+lr_scheduler  = get_scheduler(
+    "cosine", optimizer=optimizer,
+    num_warmup_steps=100, num_training_steps=args.max_steps,
+)
+
+# ----------------------- Prepare (FSDP wrap, DDP, etc.) -----------------------
+model, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+    model, optimizer, dataloader, lr_scheduler
+)
+
+# ----------------------- Training loop ----------------------------------------
+progress_bar  = tqdm(range(args.max_steps), disable=not is_main)
+model.train()
+step = 0
+while step < args.max_steps:
+    for batch in dataloader:
+        with accelerator.accumulate(model):
+            outputs = model(**batch)
+            loss    = outputs.loss
+            accelerator.backward(loss)
+            if accelerator.sync_gradients:
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                step += 1
+                progress_bar.update(1)
+                if is_main and step % 20 == 0:
+                    progress_bar.set_description(f"loss {loss.item():.4f}")
+                if step >= args.max_steps:
+                    break
+
+# ----------------------- Save final checkpoint --------------------------------
+accelerator.wait_for_everyone()
+unwrapped = accelerator.unwrap_model(model)
+state_dict = accelerator.get_state_dict(model)
+if is_main:
+    os.makedirs(args.output_dir, exist_ok=True)
+    unwrapped.save_pretrained(args.output_dir, state_dict=state_dict)
+    tokenizer.save_pretrained(args.output_dir)
+    print(f"\n✅  Model saved to: {args.output_dir}")
