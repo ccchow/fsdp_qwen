@@ -1,16 +1,20 @@
 compute_environment: LOCAL_MACHINE
 distributed_type: FSDP
-mixed_precision: bf16      # or fp16 if your driver/PyTorch lacks bf16
-num_processes: 1
+
 num_machines: 1
 machine_rank: 0
-gpu_ids: "0"
+num_processes: 2          # one process per GPU
+gpu_ids: 0,1              # or just omit → “all”
+
+mixed_precision: bf16     # switch to fp16 if your GPUs/driver lack BF16
+downcast_bf16: "no"
+
 fsdp_config:
   fsdp_sharding_strategy: FULL_SHARD
-  fsdp_offload_params: true
+  fsdp_offload_params: true        # true only if you STILL OOM
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: Qwen3DecoderLayer
+  # fully-qualified path so Accelerate can import it itself:
+  # fsdp_transformer_layer_cls_to_wrap: transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer
   fsdp_backward_prefetch: BACKWARD_PRE
   fsdp_state_dict_type: SHARDED_STATE_DICT
-  fsdp_use_orig_params: false
   fsdp_sync_module_states: true

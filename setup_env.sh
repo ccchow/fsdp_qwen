@@ -17,12 +17,10 @@ conda activate qwen-finetune
 
 # ---------- 2.  Packages ------------------------------------------------------
 pip install --upgrade pip
-# PyTorch 2.0.1 for CUDA 11.8 (adjust cu117/cu121 if needed)
-pip install torch==2.0.1+cu118 torchvision==0.15.2+cu118 torchaudio==2.0.2 \
-  --extra-index-url https://download.pytorch.org/whl/cu118
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # HF + PEFT
-pip install transformers>=4.37 accelerate datasets peft tqdm
+pip install transformers accelerate datasets peft tqdm
 
 # (Optional) flash-attention-2 for faster long-ctx training
 # pip install flash-attn --no-build-isolation

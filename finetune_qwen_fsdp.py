@@ -20,7 +20,7 @@ from tqdm.auto import tqdm
 
 # ----------------------- CLI arguments ----------------------------------------
 parser = argparse.ArgumentParser()
-parser.add_argument("--model_name", default="Qwen/Qwen3-0.6B")
+parser.add_argument("--model_name", default="Qwen/Qwen3-8B")
 parser.add_argument("--dataset_name", default="HuggingFaceFW/fineweb-edu")
 parser.add_argument("--subset",      default="sample-10BT")   # subset in HF repo
 parser.add_argument("--output_dir",  required=True)
