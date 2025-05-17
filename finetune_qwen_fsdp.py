@@ -9,13 +9,17 @@ Usage:
       --max_steps 5000               # stop after N steps (optional)
 """
 
-import argparse, os, math, torch
+import argparse
+import os
+import torch
 from functools import partial
 from datasets import load_dataset, IterableDataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_scheduler
 from torch.optim import AdamW
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
+from torch.distributed import barrier
+from torch.distributed.device_mesh import DeviceMesh
 from tqdm.auto import tqdm
 
 # ----------------------- CLI arguments ----------------------------------------
@@ -29,6 +33,17 @@ parser.add_argument("--batch_size",  type=int, default=2)
 parser.add_argument("--grad_accum",  type=int, default=8)
 parser.add_argument("--lr",          type=float, default=2e-5)
 parser.add_argument("--max_steps",   type=int, default=10_000)
+parser.add_argument(
+    "--diloco_loops",
+    type=int,
+    default=1,
+    help="Number of outer Diloco loops to run before exit",
+)
+parser.add_argument(
+    "--text_field",
+    default=None,
+    help="Dataset field containing the text (defaults to auto-detect)",
+)
 args = parser.parse_args()
 
 # ----------------------- Accelerator & precision ------------------------------
@@ -51,12 +66,26 @@ def get_dataset():
         args.dataset_name,
         name=args.subset,
         split="train",
-        streaming=True,   # no local download
+        streaming=True,  # no local download
     )
-    return ds
+    first = next(iter(ds.take(1)))
+    if args.text_field:
+        if args.text_field not in first:
+            raise ValueError(f"Dataset has no field '{args.text_field}'")
+        field = args.text_field
+    else:
+        if "text" in first:
+            field = "text"
+        elif "content" in first:
+            field = "content"
+        else:
+            raise ValueError(
+                "Dataset must contain a 'text' or 'content' field; use --text_field"
+            )
+    return ds, field
 
-def tokenize_batch(examples, seq_len):
-    texts  = [ex["text"] for ex in examples]
+def tokenize_batch(examples, text_field, seq_len):
+    texts  = [ex[text_field] for ex in examples]
     tokens = tokenizer(
         texts,
         max_length=seq_len,
@@ -67,8 +96,8 @@ def tokenize_batch(examples, seq_len):
     tokens["labels"] = tokens["input_ids"].clone()
     return tokens
 
-raw_dataset   = get_dataset()                       # IterableDataset
-collate_fn    = partial(tokenize_batch, seq_len=args.seq_len)
+raw_dataset, text_field = get_dataset()                       # IterableDataset
+collate_fn    = partial(tokenize_batch, text_field=text_field, seq_len=args.seq_len)
 dataloader    = DataLoader(raw_dataset, batch_size=args.batch_size,
                             collate_fn=collate_fn)
 
@@ -84,11 +113,19 @@ model, optimizer, dataloader, lr_scheduler = accelerator.prepare(
     model, optimizer, dataloader, lr_scheduler
 )
 
+# Create a DeviceMesh for the outer Diloco loop when running distributed
+if accelerator.num_processes > 1:
+    device_ids = list(range(accelerator.num_processes))
+    device_mesh = DeviceMesh("cuda", device_ids)
+else:
+    device_mesh = None
+
 # ----------------------- Training loop ----------------------------------------
 progress_bar  = tqdm(range(args.max_steps), disable=not is_main)
 model.train()
 step = 0
-while step < args.max_steps:
+outer = 0
+while step < args.max_steps and outer < args.diloco_loops:
     for batch in dataloader:
         with accelerator.accumulate(model):
             outputs = model(**batch)
@@ -104,6 +141,10 @@ while step < args.max_steps:
                     progress_bar.set_description(f"loss {loss.item():.4f}")
                 if step >= args.max_steps:
                     break
+    # Outer step synchronization
+    if device_mesh is not None:
+        barrier()
+    outer += 1
 
 # ----------------------- Save final checkpoint --------------------------------
 accelerator.wait_for_everyone()

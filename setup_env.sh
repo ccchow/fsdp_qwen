@@ -28,25 +28,9 @@ pip install transformers accelerate datasets peft tqdm
 # ---------- 3.  Hugging Face login (optional) ---------------------------------
 # huggingface-cli login
 
-# ---------- 4.  Create non-interactive Accelerate config ----------------------
-cat <<'YAML' > fsdp_single_gpu.yaml
-compute_environment: LOCAL_MACHINE
-distributed_type: FSDP
-mixed_precision: bf16      # or fp16 if your driver/PyTorch lacks bf16
-num_processes: 1
-num_machines: 1
-machine_rank: 0
-gpu_ids: 0
-fsdp_config:
-  fsdp_sharding_strategy: FULL_SHARD
-  fsdp_offload_params: true
-  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-  fsdp_transformer_layer_cls_to_wrap: Qwen2DecoderLayer
-  fsdp_backward_prefetch: BACKWARD_PRE
-  fsdp_state_dict_type: SHARDED_STATE_DICT
-  fsdp_use_orig_params: false
-  fsdp_sync_module_states: true
-YAML
+# ---------- 4.  Accelerate config --------------------------------------------
+# Use the provided `fsdp_single_gpu.yaml` as a starting point or run
+# `accelerate config` to create your own configuration.
 
 echo "✅  Environment ready.  To fine-tune, run:"
 echo "   accelerate launch --config_file=fsdp_single_gpu.yaml finetune_qwen_fsdp.py"
