@@ -29,6 +29,11 @@ parser.add_argument("--batch_size",  type=int, default=2)
 parser.add_argument("--grad_accum",  type=int, default=8)
 parser.add_argument("--lr",          type=float, default=2e-5)
 parser.add_argument("--max_steps",   type=int, default=10_000)
+parser.add_argument(
+    "--text_field",
+    default=None,
+    help="Dataset field containing the text (defaults to auto-detect)",
+)
 args = parser.parse_args()
 
 # ----------------------- Accelerator & precision ------------------------------
@@ -51,12 +56,26 @@ def get_dataset():
         args.dataset_name,
         name=args.subset,
         split="train",
-        streaming=True,   # no local download
+        streaming=True,  # no local download
     )
-    return ds
+    first = next(iter(ds.take(1)))
+    if args.text_field:
+        if args.text_field not in first:
+            raise ValueError(f"Dataset has no field '{args.text_field}'")
+        field = args.text_field
+    else:
+        if "text" in first:
+            field = "text"
+        elif "content" in first:
+            field = "content"
+        else:
+            raise ValueError(
+                "Dataset must contain a 'text' or 'content' field; use --text_field"
+            )
+    return ds, field
 
-def tokenize_batch(examples, seq_len):
-    texts  = [ex["text"] for ex in examples]
+def tokenize_batch(examples, text_field, seq_len):
+    texts  = [ex[text_field] for ex in examples]
     tokens = tokenizer(
         texts,
         max_length=seq_len,
@@ -67,8 +86,8 @@ def tokenize_batch(examples, seq_len):
     tokens["labels"] = tokens["input_ids"].clone()
     return tokens
 
-raw_dataset   = get_dataset()                       # IterableDataset
-collate_fn    = partial(tokenize_batch, seq_len=args.seq_len)
+raw_dataset, text_field = get_dataset()                       # IterableDataset
+collate_fn    = partial(tokenize_batch, text_field=text_field, seq_len=args.seq_len)
 dataloader    = DataLoader(raw_dataset, batch_size=args.batch_size,
                             collate_fn=collate_fn)
 
