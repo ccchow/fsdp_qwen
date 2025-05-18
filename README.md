@@ -26,6 +26,8 @@ After the environment is ready, launch training with the example script
 accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py --output_dir ./qwen-output
 ```
 
+The trainer will automatically set the tokenizer's `pad_token` to the `eos_token` if the former is missing.
+
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
 ## Unique Samples Per Rank
@@ -35,6 +37,27 @@ of the dataset. A simple approach is to rely on the `datasets` streaming API and
 provide a distinct `seed` for each process (e.g. derive it from
 `accelerator.process_index`). Proper shuffling of the data is important for the
 DiLoCo optimizer to converge.
+
+### Multi-Node Launch
+
+When running on multiple machines, start the script on each node with its
+`machine_rank` and the total number of nodes. The trainer builds a per-node
+process group so that FSDP shards only among GPUs on the same host.
+
+```bash
+# node 0
+accelerate launch --num_machines 2 --machine_rank 0 \
+    --config_file fsdp_multi_gpu.yaml finetune_qwen_fsdp.py --output_dir /path/to/out
+
+# node 1
+accelerate launch --num_machines 2 --machine_rank 1 \
+    --config_file fsdp_multi_gpu.yaml finetune_qwen_fsdp.py --output_dir /path/to/out
+```
+
+`fsdp_multi_gpu.yaml` should describe the GPU layout for a single node (e.g. 4
+processes) and the address of node 0. With this setup, model shards are kept
+local to each node while gradients for the outer loop are synchronized across
+all nodes.
 
 ## Sanity Check
 

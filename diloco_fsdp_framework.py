@@ -22,8 +22,10 @@ from torch.optim import AdamW, SGD
 from torch.utils.data import DataLoader
 from torch.distributed import barrier
 from torch.distributed.device_mesh import DeviceMesh
+import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_scheduler
 from accelerate import Accelerator
+from accelerate.utils import FullyShardedDataParallelPlugin
 from tqdm.auto import tqdm
 
 
@@ -51,16 +53,37 @@ class DilocoFSDPTrainer:
 
     def __init__(self, config: TrainerConfig, accelerator: Optional[Accelerator] = None):
         self.config = config
-        self.accelerator = accelerator or Accelerator(
-            gradient_accumulation_steps=config.grad_accum
-        )
+
+        if accelerator is None:
+            self._fsdp_plugin = FullyShardedDataParallelPlugin()
+            self.accelerator = Accelerator(
+                gradient_accumulation_steps=config.grad_accum,
+                fsdp_plugin=self._fsdp_plugin,
+            )
+        else:
+            self.accelerator = accelerator
+            self._fsdp_plugin = getattr(self.accelerator.state, "fsdp_plugin", None)
+
         self.device = self.accelerator.device
         self.is_main = self.accelerator.is_main_process
+
+        # Create a per-node process group so FSDP only shards within each node
+        self.fsdp_process_group = None
+        if self.accelerator.num_processes > 1 and dist.is_initialized():
+            local_world = int(os.environ.get("LOCAL_WORLD_SIZE", self.accelerator.num_processes))
+            rank = dist.get_rank()
+            start = (rank // local_world) * local_world
+            ranks = list(range(start, start + local_world))
+            self.fsdp_process_group = dist.new_group(ranks=ranks)
+            if self._fsdp_plugin is not None:
+                self._fsdp_plugin.fsdp_process_group = self.fsdp_process_group
 
         # --- Tokenizer & model ---
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.model_name, use_fast=False, trust_remote_code=True
         )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(
             config.model_name,
             torch_dtype=torch.bfloat16
@@ -68,6 +91,7 @@ class DilocoFSDPTrainer:
             else torch.float16,
             trust_remote_code=True,
         )
+        self.model.config.use_cache = False
         self.model.gradient_checkpointing_enable()
 
         # --- Dataset streaming ---

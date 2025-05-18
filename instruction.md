@@ -68,6 +68,8 @@ from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B")
 ```
 
+If the tokenizer lacks a padding token, the training framework will automatically set `tokenizer.pad_token` to the end-of-sequence token.
+
 Qwen’s tokenizer has a large vocabulary (\~152k tokens), covering multiple languages and code. We should decide on a maximum sequence length for training (for example, 512 or 1024 tokens) to balance memory and the ability to capture long contexts. The Qwen model supports up to 16k or more tokens context, but a 3090 GPU may not handle very long sequences in training, so we might choose 1024 for fine-tuning.
 
 There are two approaches to prepare batches:
