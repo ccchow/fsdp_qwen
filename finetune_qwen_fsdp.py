@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
 Fine-tune Qwen-0.5B on FineWeb-Edu (sample-10BT) using Hugging Face Accelerate
-with FSDP + CPU-offload on a single RTX 3090.  About 12 GB GPU RAM at
-batch-2×1024.
+with FSDP + CPU-offload on a single RTX 3090. The outer Diloco step now uses an
+SGD optimizer running on CPU.  About 12 GB GPU RAM at batch-2×1024.
 
 Usage (single machine):
   accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py \
@@ -22,7 +22,7 @@ import torch
 from functools import partial
 from datasets import load_dataset, IterableDataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_scheduler
-from torch.optim import AdamW
+from torch.optim import AdamW, SGD
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from torch.distributed import barrier
@@ -47,10 +47,16 @@ parser.add_argument(
     help="Number of outer Diloco loops to run before exit",
 )
 parser.add_argument(
+    "--outer_lr",
+    type=float,
+    default=1e-3,
+    help="Learning rate for the outer Diloco SGD optimizer",
+)
+parser.add_argument(
     "--outer_momentum",
     type=float,
     default=0.0,
-    help="Nesterov momentum applied at each outer Diloco cycle",
+    help="Momentum used by the outer Diloco SGD optimizer",
 )
 parser.add_argument(
     "--text_field",
@@ -125,6 +131,7 @@ lr_scheduler  = get_scheduler(
 model, optimizer, dataloader, lr_scheduler = accelerator.prepare(
     model, optimizer, dataloader, lr_scheduler
 )
+outer_optimizer = SGD(model.parameters(), lr=args.outer_lr, momentum=args.outer_momentum)
 
 # Create a DeviceMesh for the outer Diloco loop when running distributed
 if accelerator.num_processes > 1:
@@ -133,13 +140,12 @@ if accelerator.num_processes > 1:
 else:
     device_mesh = None
 
-# Initialize momentum buffers for outer loops if enabled
+# Initialize buffers for the outer SGD optimizer (stored on CPU)
+prev_params = [p.data.detach().cpu().clone() for p in model.parameters()]
 if args.outer_momentum > 0:
-    momentum_buffers = [torch.zeros_like(p) for p in model.parameters()]
-    prev_params = [p.data.clone().detach() for p in model.parameters()]
+    momentum_buffers = [torch.zeros_like(p, device="cpu") for p in model.parameters()]
 else:
     momentum_buffers = []
-    prev_params = []
 
 # ----------------------- Training loop ----------------------------------------
 progress_bar  = tqdm(range(args.max_steps), disable=not is_main)
@@ -165,17 +171,20 @@ while step < args.max_steps and outer < args.diloco_loops:
     # Outer step synchronization
     if device_mesh is not None:
         barrier()
-    if args.outer_momentum > 0:
-        with torch.no_grad():
-            for p, v, prev in zip(model.parameters(), momentum_buffers, prev_params):
-                delta = p.data - prev
-                v.mul_(args.outer_momentum).add_(delta)
-                p.data.add_(args.outer_momentum * v)
-                prev.copy_(p.data)
-    elif prev_params:
-        # Keep previous parameters updated even if momentum is disabled
-        for prev, p in zip(prev_params, model.parameters()):
-            prev.copy_(p.data)
+    # ----- Outer SGD step offloaded to CPU -----
+    with torch.no_grad():
+        for i, (p, prev) in enumerate(zip(model.parameters(), prev_params)):
+            grad = p.data.detach().cpu() - prev
+            if args.outer_momentum > 0:
+                buf = momentum_buffers[i]
+                buf.mul_(args.outer_momentum).add_(grad)
+                grad = buf
+            p.grad = grad.to(p.device)
+            prev.copy_(p.data.detach().cpu())
+    outer_optimizer.step()
+    outer_optimizer.zero_grad()
+    for p in model.parameters():
+        p.grad = None
     outer += 1
 
 # ----------------------- Save final checkpoint --------------------------------
