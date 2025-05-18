@@ -149,11 +149,12 @@ class DilocoFSDPTrainer:
     # ------------------------------------------------------------------
     def train(self):
         cfg = self.config
-        progress_bar = tqdm(range(cfg.max_steps), disable=not self.is_main)
+        progress_bar = tqdm(
+            range(cfg.max_steps * cfg.diloco_loops), disable=not self.is_main
+        )
         self.model.train()
-        step = 0
-        outer = 0
-        while step < cfg.max_steps and outer < cfg.diloco_loops:
+        for _ in range(cfg.diloco_loops):
+            step = 0
             for batch in self.dataloader:
                 with self.accelerator.accumulate(self.model):
                     outputs = self.model(**batch)
@@ -166,7 +167,9 @@ class DilocoFSDPTrainer:
                         step += 1
                         progress_bar.update(1)
                         if self.is_main and step % 20 == 0:
-                            progress_bar.set_description(f"loss {loss.item():.4f}")
+                            progress_bar.set_description(
+                                f"loss {loss.item():.4f}"
+                            )
                         if step >= cfg.max_steps:
                             break
             if self.device_mesh is not None:
@@ -184,7 +187,6 @@ class DilocoFSDPTrainer:
             self.outer_optimizer.zero_grad()
             for p in self.model.parameters():
                 p.grad = None
-            outer += 1
         self._save_final()
 
     # ------------------------------------------------------------------
