@@ -40,6 +40,12 @@ parser.add_argument(
     help="Number of outer Diloco loops to run before exit",
 )
 parser.add_argument(
+    "--outer_momentum",
+    type=float,
+    default=0.0,
+    help="Nesterov momentum applied at each outer Diloco cycle",
+)
+parser.add_argument(
     "--text_field",
     default=None,
     help="Dataset field containing the text (defaults to auto-detect)",
@@ -120,6 +126,14 @@ if accelerator.num_processes > 1:
 else:
     device_mesh = None
 
+# Initialize momentum buffers for outer loops if enabled
+if args.outer_momentum > 0:
+    momentum_buffers = [torch.zeros_like(p) for p in model.parameters()]
+    prev_params = [p.data.clone().detach() for p in model.parameters()]
+else:
+    momentum_buffers = []
+    prev_params = []
+
 # ----------------------- Training loop ----------------------------------------
 progress_bar  = tqdm(range(args.max_steps), disable=not is_main)
 model.train()
@@ -144,6 +158,17 @@ while step < args.max_steps and outer < args.diloco_loops:
     # Outer step synchronization
     if device_mesh is not None:
         barrier()
+    if args.outer_momentum > 0:
+        with torch.no_grad():
+            for p, v, prev in zip(model.parameters(), momentum_buffers, prev_params):
+                delta = p.data - prev
+                v.mul_(args.outer_momentum).add_(delta)
+                p.data.add_(args.outer_momentum * v)
+                prev.copy_(p.data)
+    elif prev_params:
+        # Keep previous parameters updated even if momentum is disabled
+        for prev, p in zip(prev_params, model.parameters()):
+            prev.copy_(p.data)
     outer += 1
 
 # ----------------------- Save final checkpoint --------------------------------
