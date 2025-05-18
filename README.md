@@ -26,6 +26,8 @@ After the environment is ready, launch training with the example script
 accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py --output_dir ./qwen-output
 ```
 
+The trainer will automatically set the tokenizer's `pad_token` to the `eos_token` if the former is missing.
+
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
 ## Sanity Check

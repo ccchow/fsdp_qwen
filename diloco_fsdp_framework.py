@@ -61,6 +61,8 @@ class DilocoFSDPTrainer:
         self.tokenizer = AutoTokenizer.from_pretrained(
             config.model_name, use_fast=False, trust_remote_code=True
         )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(
             config.model_name,
             torch_dtype=torch.bfloat16
@@ -68,6 +70,7 @@ class DilocoFSDPTrainer:
             else torch.float16,
             trust_remote_code=True,
         )
+        self.model.config.use_cache = False
         self.model.gradient_checkpointing_enable()
 
         # --- Dataset streaming ---
