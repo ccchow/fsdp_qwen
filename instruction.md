@@ -118,6 +118,13 @@ Here we chose a **batch\_size of 2** sequences per step as a conservative defaul
 
 *Note:* If you instead loaded a **small subset into memory** (not streaming), you could use `dataset.map` to tokenize all texts and then use `datasets.DataCollatorForLanguageModeling` (with `mlm=False`) to collate batches. However, for the sake of memory and given the dataset size, streaming + custom collate is more practical here.
 
+## Ensuring Unique Samples per Rank
+
+When scaling training beyond a single GPU, each rank should read different
+examples. With the `datasets` streaming API you can pass a unique `seed` for
+every process (e.g. `accelerator.process_index`) so that shuffling yields distinct
+chunks on each rank. Properly shuffled data is required for DiLoCo to converge.
+
 ## Step 3: Configuring Hugging Face Accelerate for FSDP (Single GPU)
 
 Hugging Face **Accelerate** makes it easy to use distributed training techniques like Fully Sharded Data Parallel (FSDP). FSDP is a PyTorch feature that shards a model’s parameters, gradients, and optimizer states across multiple GPUs to reduce memory usage. In multi-GPU scenarios, each GPU holds only a fraction of the model and only gathers full weights when needed, enabling training of very large models (in fact, FSDP has been shown to scale to models with trillions of parameters). It can also optionally offload model shards to CPU RAM when not in use, further saving GPU memory at the cost of speed.

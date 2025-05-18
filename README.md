@@ -30,6 +30,14 @@ The trainer will automatically set the tokenizer's `pad_token` to the `eos_token
 
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
+## Unique Samples Per Rank
+
+When running on multiple GPUs, ensure that each rank receives a different slice
+of the dataset. A simple approach is to rely on the `datasets` streaming API and
+provide a distinct `seed` for each process (e.g. derive it from
+`accelerator.process_index`). Proper shuffling of the data is important for the
+DiLoCo optimizer to converge.
+
 ### Multi-Node Launch
 
 When running on multiple machines, start the script on each node with its
