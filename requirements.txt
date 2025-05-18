@@ -4,3 +4,4 @@ accelerate
 datasets
 peft
 tqdm
+pytest
