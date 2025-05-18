@@ -26,6 +26,18 @@ accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py --out
 
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
+## Sanity Check
+
+To verify that your environment and dependencies are working, you can run a very
+short training loop with `sanity_check_framework.py`:
+
+```bash
+python sanity_check_framework.py --output_dir ./tmp-check
+```
+
+This will instantiate the `DilocoFSDPTrainer` and perform a single training
+step using the sample FineWeb-Edu subset.
+
 ## License
 
 This project is licensed under the terms of the MIT License. See [LICENSE](LICENSE) for details.
