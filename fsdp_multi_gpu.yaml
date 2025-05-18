@@ -1,0 +1,25 @@
+# Accelerate config for multi-machine FSDP (4 GPUs per node)
+compute_environment: MULTI_MACHINE
+distributed_type: FSDP
+
+num_machines: 2           # total number of machines
+machine_rank: 0           # set per machine
+num_processes: 4          # GPUs per machine
+gpu_ids: all
+
+mixed_precision: bf16     # or fp16 if BF16 unsupported
+downcast_bf16: "no"
+
+main_process_ip: 192.168.1.1  # IP of machine_rank 0
+main_process_port: 29500
+
+fsdp_config:
+  fsdp_sharding_strategy: FULL_SHARD
+  fsdp_offload_params: false
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  # fully-qualified path so Accelerate can import it itself:
+  # fsdp_transformer_layer_cls_to_wrap: transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer
+  fsdp_backward_prefetch: BACKWARD_PRE
+  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_sync_module_states: true
+

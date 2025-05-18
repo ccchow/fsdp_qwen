@@ -1,12 +1,19 @@
 #!/usr/bin/env python
 """
 Fine-tune Qwen-0.5B on FineWeb-Edu (sample-10BT) using Hugging Face Accelerate
-with FSDP + CPU-offload on a single RTX 3090.  About 12 GB GPU RAM at batch-2×1024.
+with FSDP + CPU-offload on a single RTX 3090.  About 12 GB GPU RAM at
+batch-2×1024.
 
-Usage:
+Usage (single machine):
   accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py \
       --output_dir ./qwen-0.5B-fineweb-edu \
       --max_steps 5000               # stop after N steps (optional)
+
+Distributed launch (two machines with four GPUs each):
+  accelerate launch --config_file fsdp_multi_gpu.yaml \
+      --machine_rank 0 --main_process_ip <node0-ip> \
+      finetune_qwen_fsdp.py --output_dir ./qwen-0.5B-fineweb-edu
+  # Run again on the second machine with --machine_rank 1
 """
 
 import argparse
