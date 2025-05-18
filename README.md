@@ -28,6 +28,14 @@ accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py --out
 
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
+## Unique Samples Per Rank
+
+When running on multiple GPUs, ensure that each rank receives a different slice
+of the dataset. A simple approach is to rely on the `datasets` streaming API and
+provide a distinct `seed` for each process (e.g. derive it from
+`accelerator.process_index`). Proper shuffling of the data is important for the
+DiLoCo optimizer to converge.
+
 ## Sanity Check
 
 To verify that your environment and dependencies are working, you can run a very
