@@ -30,6 +30,27 @@ The trainer will automatically set the tokenizer's `pad_token` to the `eos_token
 
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
+### Multi-Node Launch
+
+When running on multiple machines, start the script on each node with its
+`machine_rank` and the total number of nodes. The trainer builds a per-node
+process group so that FSDP shards only among GPUs on the same host.
+
+```bash
+# node 0
+accelerate launch --num_machines 2 --machine_rank 0 \
+    --config_file fsdp_multi_gpu.yaml finetune_qwen_fsdp.py --output_dir /path/to/out
+
+# node 1
+accelerate launch --num_machines 2 --machine_rank 1 \
+    --config_file fsdp_multi_gpu.yaml finetune_qwen_fsdp.py --output_dir /path/to/out
+```
+
+`fsdp_multi_gpu.yaml` should describe the GPU layout for a single node (e.g. 4
+processes) and the address of node 0. With this setup, model shards are kept
+local to each node while gradients for the outer loop are synchronized across
+all nodes.
+
 ## Sanity Check
 
 To verify that your environment and dependencies are working, you can run a very
