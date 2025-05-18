@@ -3,7 +3,9 @@
 
 This module provides the :class:`DilocoFSDPTrainer` class which implements a
 training loop for decentralized fine-tuning using Fully Sharded Data Parallel
-(FSDP) and the DiLoCo outer optimization step. The original
+(FSDP) and the DiLoCo outer optimization step. It now uses a
+``DeviceMesh`` to synchronize the outer gradients across ranks so that
+each worker applies the same update. The original
 ``finetune_qwen_fsdp.py`` script is now a thin wrapper around this framework.
 """
 
@@ -173,12 +175,16 @@ class DilocoFSDPTrainer:
                 barrier()
             with torch.no_grad():
                 for i, (p, prev) in enumerate(zip(self.model.parameters(), self.prev_params)):
-                    grad = p.data.detach().cpu() - prev
+                    grad_cpu = p.data.detach().cpu() - prev
                     if cfg.outer_momentum > 0:
                         buf = self.momentum_buffers[i]
-                        buf.mul_(cfg.outer_momentum).add_(grad)
-                        grad = buf
-                    p.grad = grad.to(p.device)
+                        buf.mul_(cfg.outer_momentum).add_(grad_cpu)
+                        grad_cpu = buf
+                    grad = grad_cpu.to(p.device)
+                    if self.device_mesh is not None:
+                        self.device_mesh.all_reduce(grad)
+                        grad.div_(self.accelerator.num_processes)
+                    p.grad = grad
                     prev.copy_(p.data.detach().cpu())
             self.outer_optimizer.step()
             self.outer_optimizer.zero_grad()

@@ -1,6 +1,8 @@
 # Qwen FSDP Fine-Tuning Examples
 
 This repository contains simple scripts for fine-tuning Qwen models with [Hugging Face Accelerate](https://github.com/huggingface/accelerate) using Fully Sharded Data Parallel (FSDP). The examples target a single-GPU workstation and are based on the walkthrough in `instruction.md`.
+The ``DilocoFSDPTrainer`` uses a ``DeviceMesh`` to synchronize the outer
+optimization step across ranks when running with multiple GPUs.
 
 ## Environment Setup
 
