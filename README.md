@@ -17,7 +17,8 @@ A helper script `setup_env.sh` demonstrates these steps.
 
 ## Running a Fine-Tuning Job
 
-After the environment is ready, launch training with:
+After the environment is ready, launch training with the example script
+`finetune_qwen_fsdp.py`, which uses the generic `DilocoFSDPTrainer` framework:
 
 ```bash
 accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py --output_dir ./qwen-output
