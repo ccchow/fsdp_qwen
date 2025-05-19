@@ -4,6 +4,7 @@
 import argparse
 import math
 import time
+import torch
 
 from diloco_fsdp_framework import DilocoFSDPTrainer, TrainerConfig
 
@@ -45,8 +46,12 @@ def evaluate(trainer: DilocoFSDPTrainer, num_batches: int) -> None:
             losses.append(outputs.loss.item())
     trainer.model.train()
     if losses:
-        ppl = math.exp(sum(losses) / len(losses))
-        print(f"\nEval perplexity over {num_batches} batches: {ppl:.2f}")
+        mean_loss = sum(losses) / len(losses)
+        if math.isfinite(mean_loss):
+            ppl = math.exp(mean_loss)
+            print(f"\nEval perplexity over {num_batches} batches: {ppl:.2f}")
+        else:
+            print("\nEval produced NaN/Inf loss.")
 
 
 def main() -> None:
