@@ -129,11 +129,18 @@ class DilocoFSDPTrainer:
         else:
             self.device_mesh = None
 
-        self.prev_params = [p.data.detach().cpu().clone() for p in self.model.parameters()]
+        self.prev_vector = torch.nn.utils.parameters_to_vector(
+            [p.detach().cpu().clone() for p in self.model.parameters()]
+        )
         if config.outer_momentum > 0:
-            self.momentum_buffers = [torch.zeros_like(p, device="cpu") for p in self.model.parameters()]
+            self.momentum_buffer = torch.zeros_like(self.prev_vector)
         else:
-            self.momentum_buffers = []
+            self.momentum_buffer = None
+
+        self.grad_params = [
+            torch.nn.Parameter(torch.zeros_like(p), requires_grad=False)
+            for p in self.model.parameters()
+        ]
 
     # ------------------------------------------------------------------
     def _get_dataset(self) -> Tuple[IterableDataset, str]:
@@ -201,18 +208,21 @@ class DilocoFSDPTrainer:
             if self.device_mesh is not None:
                 barrier()
             with torch.no_grad():
-                for i, (p, prev) in enumerate(zip(self.model.parameters(), self.prev_params)):
-                    grad_cpu = p.data.detach().cpu() - prev
-                    if cfg.outer_momentum > 0:
-                        buf = self.momentum_buffers[i]
-                        buf.mul_(cfg.outer_momentum).add_(grad_cpu)
-                        grad_cpu = buf
-                    grad = grad_cpu.to(p.device)
-                    if self.device_mesh is not None:
-                        self.device_mesh.all_reduce(grad)
-                        grad.div_(self.accelerator.num_processes)
-                    p.grad = grad
-                    prev.copy_(p.data.detach().cpu())
+                curr_vector = torch.nn.utils.parameters_to_vector(
+                    [p.detach().cpu() for p in self.model.parameters()]
+                )
+                delta = curr_vector - self.prev_vector
+                if cfg.outer_momentum > 0:
+                    self.momentum_buffer.mul_(cfg.outer_momentum).add_(delta)
+                    delta = self.momentum_buffer
+                delta_gpu = delta.to(self.device)
+                if self.device_mesh is not None:
+                    self.device_mesh.all_reduce(delta_gpu)
+                    delta_gpu.div_(self.accelerator.num_processes)
+                torch.nn.utils.vector_to_parameters(delta_gpu, self.grad_params)
+                for p, g in zip(self.model.parameters(), self.grad_params):
+                    p.grad = g.data
+                self.prev_vector.copy_(curr_vector)
             self.outer_optimizer.step()
             self.outer_optimizer.zero_grad()
             for p in self.model.parameters():
