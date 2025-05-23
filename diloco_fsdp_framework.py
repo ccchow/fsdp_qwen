@@ -218,7 +218,7 @@ class DilocoFSDPTrainer:
                 if cfg.outer_momentum > 0:
                     self.momentum_buffer.mul_(cfg.outer_momentum).add_(delta)
                     delta = self.momentum_buffer
-                delta_gpu = delta.to(self.device)
+                delta_gpu = delta.to(self.device, dtype=self.grad_params[0].dtype)
                 if self.device_mesh is not None:
                     self.device_mesh.all_reduce(delta_gpu)
                     delta_gpu.div_(self.accelerator.num_processes)
