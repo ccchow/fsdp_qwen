@@ -129,9 +129,12 @@ class DilocoFSDPTrainer:
         else:
             self.device_mesh = None
 
-        self.prev_vector = torch.nn.utils.parameters_to_vector(
-            [p.detach().cpu().clone() for p in self.model.parameters()]
-        )
+        # Store a compressed snapshot of the parameters to reduce memory
+        # overhead.  Using float16 provides a reasonable trade-off between
+        # precision and size and avoids cloning the full parameter tensors.
+        with torch.no_grad():
+            params = [p.detach().cpu().to(torch.float16) for p in self.model.parameters()]
+            self.prev_vector = torch.nn.utils.parameters_to_vector(params)
         if config.outer_momentum > 0:
             self.momentum_buffer = torch.zeros_like(self.prev_vector)
         else:
@@ -210,7 +213,7 @@ class DilocoFSDPTrainer:
             with torch.no_grad():
                 curr_vector = torch.nn.utils.parameters_to_vector(
                     [p.detach().cpu() for p in self.model.parameters()]
-                )
+                ).to(self.prev_vector.dtype)
                 delta = curr_vector - self.prev_vector
                 if cfg.outer_momentum > 0:
                     self.momentum_buffer.mul_(cfg.outer_momentum).add_(delta)

@@ -28,6 +28,8 @@ def make_trainer(config):
 class DummyTokenizer:
     def __init__(self):
         self.called_with = None
+        self.pad_token = None
+        self.eos_token = 0
 
     def __call__(self, texts, max_length, truncation, padding, return_tensors):
         self.called_with = {
@@ -133,3 +135,31 @@ def test_save_final(tmp_path):
 
     assert (tmp_path / 'model.saved').exists()
     assert (tmp_path / 'tokenizer.saved').exists()
+
+
+def test_init_compressed_prev_vector(monkeypatch):
+    ds = DummyDataset([{'text': 'a'}])
+
+    monkeypatch.setattr(df, 'load_dataset', lambda *a, **k: ds)
+    monkeypatch.setattr(df.AutoTokenizer, 'from_pretrained', lambda *a, **k: DummyTokenizer())
+
+    def fake_model(*args, **kwargs):
+        model = torch.nn.Linear(2, 2)
+        model.config = types.SimpleNamespace(use_cache=False)
+        model.gradient_checkpointing_enable = lambda: None
+        return model
+
+    monkeypatch.setattr(df.AutoModelForCausalLM, 'from_pretrained', fake_model)
+
+    dummy_acc = SimpleNamespace(
+        device=torch.device('cpu'),
+        is_main_process=True,
+        num_processes=1,
+        mixed_precision='no',
+        state=SimpleNamespace(fsdp_plugin=None),
+        prepare=lambda *args: args,
+    )
+
+    cfg = df.TrainerConfig('m', 'd', 's', 'out', max_steps=1)
+    trainer = df.DilocoFSDPTrainer(cfg, accelerator=dummy_acc)
+    assert trainer.prev_vector.dtype == torch.float16
