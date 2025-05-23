@@ -133,3 +133,67 @@ def test_save_final(tmp_path):
 
     assert (tmp_path / 'model.saved').exists()
     assert (tmp_path / 'tokenizer.saved').exists()
+
+
+class Bf16Accelerator:
+    device = torch.device('cpu')
+    is_main_process = True
+    mixed_precision = 'bf16'
+    num_processes = 1
+    sync_gradients = True
+
+    def accumulate(self, model):
+        class Ctx:
+            def __enter__(self_):
+                pass
+
+            def __exit__(self_, exc_type, exc, tb):
+                pass
+
+        return Ctx()
+
+    def backward(self, loss):
+        loss.backward()
+
+
+class DummyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        self.config = SimpleNamespace(use_cache=True)
+
+    def gradient_checkpointing_enable(self):
+        pass
+
+    def forward(self, input_ids, labels=None):
+        loss = (input_ids.float().mean() * self.weight)
+        return SimpleNamespace(loss=loss)
+
+
+def test_train_bf16_dtype():
+    cfg = df.TrainerConfig('m', 'n', 's', 'o', max_steps=1)
+    trainer = make_trainer(cfg)
+    trainer.accelerator = Bf16Accelerator()
+    trainer.device = trainer.accelerator.device
+    trainer.is_main = True
+    trainer.device_mesh = None
+    trainer.model = DummyModel().to(torch.bfloat16)
+    trainer.optimizer = torch.optim.AdamW(trainer.model.parameters(), lr=0.1)
+    trainer.lr_scheduler = SimpleNamespace(step=lambda: None)
+    trainer.outer_optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.1)
+    batch = {
+        'input_ids': torch.ones(1, 2, dtype=torch.long),
+        'labels': torch.ones(1, 2, dtype=torch.long),
+    }
+    trainer.dataloader = [batch]
+    trainer.prev_vector = torch.nn.utils.parameters_to_vector(
+        [p.detach().cpu().clone() for p in trainer.model.parameters()]
+    )
+    trainer.grad_params = [
+        torch.nn.Parameter(torch.zeros_like(p), requires_grad=False)
+        for p in trainer.model.parameters()
+    ]
+    trainer.momentum_buffer = None
+    trainer._save_final = lambda: None
+
+    df.DilocoFSDPTrainer.train(trainer)
