@@ -45,6 +45,8 @@ class TrainerConfig:
     diloco_loops: int = 1
     outer_lr: float = 1e-3
     outer_momentum: float = 0.0
+    outer_lr_schedule: Optional[str] = None
+    outer_grad_clip: Optional[float] = None
     text_field: Optional[str] = None
     log_with: Optional[str] = None
     log_dir: Optional[str] = None
@@ -178,6 +180,15 @@ class DilocoFSDPTrainer:
             outer_kwargs["momentum"] = config.outer_momentum
         outer_kwargs.update(config.outer_opt_kwargs)
         self.outer_optimizer = outer_cls(self.model.parameters(), **outer_kwargs)
+        if config.outer_lr_schedule:
+            self.outer_lr_scheduler = get_scheduler(
+                config.outer_lr_schedule,
+                optimizer=self.outer_optimizer,
+                num_warmup_steps=0,
+                num_training_steps=config.diloco_loops,
+            )
+        else:
+            self.outer_lr_scheduler = None
 
         if self.accelerator.num_processes > 1:
             device_ids = list(range(self.accelerator.num_processes))
@@ -336,7 +347,14 @@ class DilocoFSDPTrainer:
                       p.grad = g.data
                   self.prev_vector.copy_(curr_vector)
               delta_norm = delta.norm().item()
+              if cfg.outer_grad_clip:
+                  torch.nn.utils.clip_grad_norm_(
+                      self.model.parameters(), cfg.outer_grad_clip
+                  )
               self.outer_optimizer.step()
+              scheduler = getattr(self, "outer_lr_scheduler", None)
+              if scheduler is not None:
+                  scheduler.step()
               self.outer_optimizer.zero_grad()
               if self.is_main:
                   self._log({"outer/delta_norm": delta_norm}, self.global_step)
