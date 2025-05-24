@@ -50,6 +50,15 @@ class TrainerConfig:
     log_dir: Optional[str] = None
     eval_batches: int = 0
 
+    def __post_init__(self) -> None:
+        """Validate configuration values."""
+        if self.diloco_loops <= 0:
+            raise ValueError("diloco_loops must be > 0")
+        if not 0.0 <= self.outer_momentum <= 1.0:
+            raise ValueError("outer_momentum must be between 0.0 and 1.0")
+        if self.lr <= 0 or self.outer_lr <= 0:
+            raise ValueError("learning rate values must be positive")
+
 
 class DilocoFSDPTrainer:
     """Trainer implementing DiLoCo + FSDP for generic models and datasets."""
