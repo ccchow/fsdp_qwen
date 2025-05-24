@@ -11,12 +11,17 @@ import diloco_fsdp_framework as df
 class DummyDataset:
     def __init__(self, samples):
         self.samples = list(samples)
+        self.shuffled_with = None
 
     def take(self, n):
         return (self.samples[i] for i in range(min(n, len(self.samples))))
 
     def __iter__(self):
         return iter(self.samples)
+
+    def shuffle(self, buffer_size, seed):
+        self.shuffled_with = (buffer_size, seed)
+        return self
 
 
 def make_trainer(config):
@@ -68,6 +73,7 @@ def test_get_dataset_detects_text(monkeypatch):
     dataset, field = df.DilocoFSDPTrainer._get_dataset(trainer)
     assert dataset is ds
     assert field == 'text'
+    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
 
 
 def test_get_dataset_detects_content(monkeypatch):
@@ -81,6 +87,7 @@ def test_get_dataset_detects_content(monkeypatch):
     trainer = make_trainer(cfg)
     dataset, field = df.DilocoFSDPTrainer._get_dataset(trainer)
     assert field == 'content'
+    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
 
 
 def test_get_dataset_custom_field(monkeypatch):
@@ -94,6 +101,7 @@ def test_get_dataset_custom_field(monkeypatch):
     trainer = make_trainer(cfg)
     dataset, field = df.DilocoFSDPTrainer._get_dataset(trainer)
     assert field == 'foo'
+    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
 
 
 def test_get_dataset_invalid_field(monkeypatch):
@@ -107,6 +115,7 @@ def test_get_dataset_invalid_field(monkeypatch):
     trainer = make_trainer(cfg)
     with pytest.raises(ValueError):
         df.DilocoFSDPTrainer._get_dataset(trainer)
+    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
 
 
 def test_trainer_config_validation():
@@ -127,7 +136,9 @@ def test_tokenize_batch():
     trainer = make_trainer(df.TrainerConfig('m', 'n', 's', 'o'))
     trainer.tokenizer = tokenizer
     examples = [{'txt': 'hello'}, {'txt': 'world'}]
-    tokens = df.DilocoFSDPTrainer._tokenize_batch(trainer, examples, text_field='txt', seq_len=3)
+    tokens = df.DilocoFSDPTrainer._tokenize_batch(
+        trainer, examples, text_field='txt', seq_len=3, dynamic_batch=False
+    )
     assert tokens['input_ids'].shape == (2, 3)
     assert torch.equal(tokens['labels'], tokens['input_ids'])
     assert tokenizer.called_with['max_length'] == 3
