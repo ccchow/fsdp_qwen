@@ -118,6 +118,19 @@ def test_get_dataset_invalid_field(monkeypatch):
     assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
 
 
+def test_trainer_config_validation():
+    with pytest.raises(ValueError):
+        df.TrainerConfig('m', 'n', 's', 'o', diloco_loops=0)
+    with pytest.raises(ValueError):
+        df.TrainerConfig('m', 'n', 's', 'o', outer_momentum=-0.1)
+    with pytest.raises(ValueError):
+        df.TrainerConfig('m', 'n', 's', 'o', outer_momentum=1.1)
+    with pytest.raises(ValueError):
+        df.TrainerConfig('m', 'n', 's', 'o', lr=0)
+    with pytest.raises(ValueError):
+        df.TrainerConfig('m', 'n', 's', 'o', outer_lr=0)
+
+
 def test_tokenize_batch():
     tokenizer = DummyTokenizer()
     trainer = make_trainer(df.TrainerConfig('m', 'n', 's', 'o'))
