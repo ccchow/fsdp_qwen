@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass
 from functools import partial
 from typing import Iterable, Tuple, Optional
+from copy import deepcopy
 
 import torch
 from datasets import load_dataset, IterableDataset
@@ -46,6 +47,8 @@ class TrainerConfig:
     outer_lr: float = 1e-3
     outer_momentum: float = 0.0
     text_field: Optional[str] = None
+    checkpoint_steps: int = 0
+    resume_from: Optional[str] = None
 
 
 class DilocoFSDPTrainer:
@@ -145,6 +148,10 @@ class DilocoFSDPTrainer:
             for p in self.model.parameters()
         ]
 
+        self.start_step = 0
+        if config.resume_from:
+            self.start_step = self.load_checkpoint(config.resume_from)
+
     # ------------------------------------------------------------------
     def _get_dataset(self) -> Tuple[IterableDataset, str]:
         ds = load_dataset(
@@ -183,14 +190,44 @@ class DilocoFSDPTrainer:
         return tokens
 
     # ------------------------------------------------------------------
+    def save_checkpoint(self, path: str, step: int) -> None:
+        """Save model and optimizer states."""
+        self.accelerator.wait_for_everyone()
+        state = {
+            "model": self.accelerator.get_state_dict(self.model),
+            "optimizer": deepcopy(self.optimizer.state_dict()),
+            "outer_optimizer": deepcopy(self.outer_optimizer.state_dict()),
+            "momentum_buffer": self.momentum_buffer.clone() if self.momentum_buffer is not None else None,
+            "step": step,
+        }
+        if self.is_main:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            torch.save(state, path)
+
+    # ------------------------------------------------------------------
+    def load_checkpoint(self, path: str) -> int:
+        """Load model and optimizer states and return the stored step."""
+        ckpt = torch.load(path, map_location="cpu")
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        unwrapped.load_state_dict(ckpt["model"])
+        self.optimizer.load_state_dict(ckpt["optimizer"])
+        self.outer_optimizer.load_state_dict(ckpt["outer_optimizer"])
+        if self.momentum_buffer is not None and ckpt.get("momentum_buffer") is not None:
+            self.momentum_buffer.copy_(ckpt["momentum_buffer"])
+        return int(ckpt.get("step", 0))
+
+    # ------------------------------------------------------------------
     def train(self):
         cfg = self.config
-        progress_bar = tqdm(
-            range(cfg.max_steps * cfg.diloco_loops), disable=not self.is_main
-        )
+        total_steps = cfg.max_steps * cfg.diloco_loops
+        progress_bar = tqdm(total=total_steps, disable=not self.is_main)
+        start = getattr(self, "start_step", 0)
+        if start:
+            progress_bar.update(start)
         self.model.train()
+        step = start
         for _ in range(cfg.diloco_loops):
-            step = 0
+            inner = 0
             for batch in self.dataloader:
                 with self.accelerator.accumulate(self.model):
                     outputs = self.model(**batch)
@@ -201,12 +238,16 @@ class DilocoFSDPTrainer:
                         self.lr_scheduler.step()
                         self.optimizer.zero_grad()
                         step += 1
+                        inner += 1
                         progress_bar.update(1)
+                        if cfg.checkpoint_steps and step % cfg.checkpoint_steps == 0:
+                            ckpt = os.path.join(cfg.output_dir, f"checkpoint_{step}.pt")
+                            self.save_checkpoint(ckpt, step)
                         if self.is_main and step % 20 == 0:
                             progress_bar.set_description(
                                 f"loss {loss.item():.4f}"
                             )
-                        if step >= cfg.max_steps:
+                        if inner >= cfg.max_steps:
                             break
             if self.device_mesh is not None:
                 barrier()
@@ -230,6 +271,8 @@ class DilocoFSDPTrainer:
             self.outer_optimizer.zero_grad()
             for p in self.model.parameters():
                 p.grad = None
+            if step >= total_steps:
+                break
         self._save_final()
 
     # ------------------------------------------------------------------
