@@ -38,6 +38,17 @@ def parse_args() -> argparse.Namespace:
         help="Momentum used by the outer Diloco SGD optimizer",
     )
     parser.add_argument(
+        "--outer_lr_schedule",
+        default=None,
+        help="Scheduler type for the outer optimizer (e.g. linear, cosine)",
+    )
+    parser.add_argument(
+        "--outer_grad_clip",
+        type=float,
+        default=None,
+        help="Max norm for outer gradients (clip before outer step)",
+    )
+    parser.add_argument(
         "--text_field",
         default=None,
         help="Dataset field containing the text (defaults to auto-detect)",
@@ -60,6 +71,8 @@ def main() -> None:
         diloco_loops=args.diloco_loops,
         outer_lr=args.outer_lr,
         outer_momentum=args.outer_momentum,
+        outer_lr_schedule=args.outer_lr_schedule,
+        outer_grad_clip=args.outer_grad_clip,
         text_field=args.text_field,
     )
     trainer = DilocoFSDPTrainer(cfg)

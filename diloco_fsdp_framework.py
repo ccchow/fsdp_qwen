@@ -45,6 +45,8 @@ class TrainerConfig:
     diloco_loops: int = 1
     outer_lr: float = 1e-3
     outer_momentum: float = 0.0
+    outer_lr_schedule: Optional[str] = None
+    outer_grad_clip: Optional[float] = None
     text_field: Optional[str] = None
 
 
@@ -122,6 +124,15 @@ class DilocoFSDPTrainer:
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=config.outer_lr, momentum=config.outer_momentum
         )
+        if config.outer_lr_schedule:
+            self.outer_lr_scheduler = get_scheduler(
+                config.outer_lr_schedule,
+                optimizer=self.outer_optimizer,
+                num_warmup_steps=0,
+                num_training_steps=config.diloco_loops,
+            )
+        else:
+            self.outer_lr_scheduler = None
 
         if self.accelerator.num_processes > 1:
             device_ids = list(range(self.accelerator.num_processes))
@@ -226,7 +237,14 @@ class DilocoFSDPTrainer:
                 for p, g in zip(self.model.parameters(), self.grad_params):
                     p.grad = g.data
                 self.prev_vector.copy_(curr_vector)
+            if cfg.outer_grad_clip:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), cfg.outer_grad_clip
+                )
             self.outer_optimizer.step()
+            scheduler = getattr(self, "outer_lr_scheduler", None)
+            if scheduler is not None:
+                scheduler.step()
             self.outer_optimizer.zero_grad()
             for p in self.model.parameters():
                 p.grad = None
