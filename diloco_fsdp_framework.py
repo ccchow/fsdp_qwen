@@ -46,6 +46,9 @@ class TrainerConfig:
     outer_lr: float = 1e-3
     outer_momentum: float = 0.0
     text_field: Optional[str] = None
+    log_with: Optional[str] = None
+    log_dir: Optional[str] = None
+    eval_batches: int = 0
 
 
 class DilocoFSDPTrainer:
@@ -66,6 +69,22 @@ class DilocoFSDPTrainer:
 
         self.device = self.accelerator.device
         self.is_main = self.accelerator.is_main_process
+
+        self.writer = None
+        if config.log_with == "tensorboard" and self.is_main:
+            from torch.utils.tensorboard import SummaryWriter
+            log_dir = config.log_dir or os.path.join(config.output_dir, "logs")
+            self.writer = SummaryWriter(log_dir)
+        elif config.log_with == "wandb" and self.is_main:
+            try:
+                import wandb  # type: ignore
+
+                wandb.init(project="diloco_fsdp", dir=config.output_dir, config=vars(config))
+                self.writer = wandb
+            except Exception:
+                print("wandb logging requested but not available")
+
+        self.global_step = 0
 
         # Create a per-node process group so FSDP only shards within each node
         self.fsdp_process_group = None
@@ -183,8 +202,46 @@ class DilocoFSDPTrainer:
         return tokens
 
     # ------------------------------------------------------------------
+    def _log(self, metrics: dict, step: int) -> None:
+        """Log metrics to the configured backend."""
+        if self.writer is None:
+            return
+        if self.config.log_with == "tensorboard":
+            for k, v in metrics.items():
+                self.writer.add_scalar(k, v, step)
+        elif self.config.log_with == "wandb":
+            self.writer.log(metrics, step=step)
+
+    # ------------------------------------------------------------------
+    def _grad_norm(self) -> float:
+        norms = [p.grad.detach().float().norm() for p in self.model.parameters() if p.grad is not None]
+        if norms:
+            return torch.norm(torch.stack(norms)).item()
+        return 0.0
+
+    # ------------------------------------------------------------------
+    def _validate(self, num_batches: int) -> float:
+        """Run a simple validation loop and return mean loss."""
+        self.model.eval()
+        losses = []
+        for i, batch in enumerate(self.dataloader):
+            if i >= num_batches:
+                break
+            with torch.no_grad():
+                outputs = self.model(**batch)
+                losses.append(outputs.loss.item())
+        self.model.train()
+        if not losses:
+            return float("nan")
+        return sum(losses) / len(losses)
+
+    # ------------------------------------------------------------------
     def train(self):
         cfg = self.config
+        if not hasattr(self, "global_step"):
+            self.global_step = 0
+        if not hasattr(self, "writer"):
+            self.writer = None
         progress_bar = tqdm(
             range(cfg.max_steps * cfg.diloco_loops), disable=not self.is_main
         )
@@ -197,15 +254,25 @@ class DilocoFSDPTrainer:
                     loss = outputs.loss
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
+                        grad_norm = self._grad_norm()
                         self.optimizer.step()
                         self.lr_scheduler.step()
                         self.optimizer.zero_grad()
                         step += 1
+                        self.global_step += 1
                         progress_bar.update(1)
-                        if self.is_main and step % 20 == 0:
-                            progress_bar.set_description(
-                                f"loss {loss.item():.4f}"
-                            )
+                        if self.is_main:
+                            lr = self.lr_scheduler.get_last_lr()[0] if hasattr(self.lr_scheduler, "get_last_lr") else self.optimizer.param_groups[0]["lr"]
+                            metrics = {
+                                "train/loss": loss.item(),
+                                "lr": lr,
+                                "grad_norm": grad_norm,
+                            }
+                            self._log(metrics, self.global_step)
+                            if step % 20 == 0:
+                                progress_bar.set_description(
+                                    f"loss {loss.item():.4f}"
+                                )
                         if step >= cfg.max_steps:
                             break
             if self.device_mesh is not None:
@@ -226,11 +293,19 @@ class DilocoFSDPTrainer:
                 for p, g in zip(self.model.parameters(), self.grad_params):
                     p.grad = g.data
                 self.prev_vector.copy_(curr_vector)
+            delta_norm = delta.norm().item()
             self.outer_optimizer.step()
             self.outer_optimizer.zero_grad()
+            if self.is_main:
+                self._log({"outer/delta_norm": delta_norm}, self.global_step)
+                if cfg.eval_batches > 0:
+                    val_loss = self._validate(cfg.eval_batches)
+                    self._log({"val/loss": val_loss}, self.global_step)
             for p in self.model.parameters():
                 p.grad = None
         self._save_final()
+        if self.writer is not None and self.config.log_with == "tensorboard":
+            self.writer.close()
 
     # ------------------------------------------------------------------
     def _save_final(self):
