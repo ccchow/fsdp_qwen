@@ -39,6 +39,13 @@ as `val/loss`.
 
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
+### TrainerConfig Parameters
+
+For a description of every option available in `TrainerConfig`, see
+[trainer_config_guide.md](trainer_config_guide.md). The guide explains how each
+field controls the training behaviour and defaults used by
+`DilocoFSDPTrainer`.
+
 ## Unique Samples Per Rank
 
 When running on multiple GPUs, ensure that each rank receives a different slice
