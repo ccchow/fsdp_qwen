@@ -2,6 +2,7 @@
 """Example fine-tuning script using the generic DiLoCo/FSDP framework."""
 
 import argparse
+import json
 
 from diloco_fsdp_framework import DilocoFSDPTrainer, TrainerConfig
 
@@ -38,6 +39,38 @@ def parse_args() -> argparse.Namespace:
         help="Momentum used by the outer Diloco SGD optimizer",
     )
     parser.add_argument(
+        "--outer_lr_schedule",
+        default=None,
+        help="Scheduler type for the outer optimizer (e.g. linear, cosine)",
+    )
+    parser.add_argument(
+        "--outer_grad_clip",
+        type=float,
+        default=None,
+        help="Max norm for outer gradients (clip before outer step)",
+    parser.add_argument(
+        "--inner_opt",
+        default="AdamW",
+        help="torch.optim optimizer class for the inner loop",
+    )
+    parser.add_argument(
+        "--inner_opt_kwargs",
+        type=json.loads,
+        default={},
+        help="JSON dict of kwargs for the inner optimizer",
+    )
+    parser.add_argument(
+        "--outer_opt",
+        default="SGD",
+        help="torch.optim optimizer class for the outer loop",
+    )
+    parser.add_argument(
+        "--outer_opt_kwargs",
+        type=json.loads,
+        default={},
+        help="JSON dict of kwargs for the outer optimizer",
+    )
+    parser.add_argument(
         "--text_field",
         default=None,
         help="Dataset field containing the text (defaults to auto-detect)",
@@ -71,6 +104,12 @@ def main() -> None:
         diloco_loops=args.diloco_loops,
         outer_lr=args.outer_lr,
         outer_momentum=args.outer_momentum,
+        outer_lr_schedule=args.outer_lr_schedule,
+        outer_grad_clip=args.outer_grad_clip,
+        inner_opt=args.inner_opt,
+        inner_opt_kwargs=args.inner_opt_kwargs,
+        outer_opt=args.outer_opt,
+        outer_opt_kwargs=args.outer_opt_kwargs,
         text_field=args.text_field,
         checkpoint_steps=args.checkpoint_steps,
         resume_from=args.resume_checkpoint,

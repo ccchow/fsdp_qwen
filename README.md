@@ -28,6 +28,15 @@ accelerate launch --config_file fsdp_single_gpu.yaml finetune_qwen_fsdp.py --out
 
 The trainer will automatically set the tokenizer's `pad_token` to the `eos_token` if the former is missing.
 
+### Logging and Validation
+
+`DilocoFSDPTrainer` can log training metrics to TensorBoard or Weights & Biases.
+Set `log_with` in `TrainerConfig` to `"tensorboard"` or `"wandb"` and optionally
+specify `log_dir`.  The trainer logs loss, learning rate, gradient norms and the
+outer-loop delta norm at every step.  Provide `eval_batches > 0` to run a short
+validation loop after each outer iteration; the mean validation loss is logged
+as `val/loss`.
+
 See `instruction.md` for a complete walkthrough and more details on dataset preparation.
 
 ## Unique Samples Per Rank
