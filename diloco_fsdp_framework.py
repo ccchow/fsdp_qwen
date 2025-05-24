@@ -12,13 +12,13 @@ each worker applies the same update. The original
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Iterable, Tuple, Optional
 
 import torch
 from datasets import load_dataset, IterableDataset
-from torch.optim import AdamW, SGD
+import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.distributed import barrier
 from torch.distributed.device_mesh import DeviceMesh
@@ -46,6 +46,10 @@ class TrainerConfig:
     outer_lr: float = 1e-3
     outer_momentum: float = 0.0
     text_field: Optional[str] = None
+    inner_opt: str = "AdamW"
+    inner_opt_kwargs: dict = field(default_factory=dict)
+    outer_opt: str = "SGD"
+    outer_opt_kwargs: dict = field(default_factory=dict)
 
 
 class DilocoFSDPTrainer:
@@ -104,7 +108,14 @@ class DilocoFSDPTrainer:
         )
 
         # --- Optimizer & scheduler ---
-        self.optimizer = AdamW(self.model.parameters(), lr=config.lr, weight_decay=0.01)
+        try:
+            inner_cls = getattr(optim, config.inner_opt)
+        except AttributeError as e:
+            raise ValueError(f"Unknown optimizer: {config.inner_opt}") from e
+
+        inner_kwargs = {"lr": config.lr, "weight_decay": 0.01}
+        inner_kwargs.update(config.inner_opt_kwargs)
+        self.optimizer = inner_cls(self.model.parameters(), **inner_kwargs)
         self.lr_scheduler = get_scheduler(
             "cosine",
             optimizer=self.optimizer,
@@ -119,9 +130,16 @@ class DilocoFSDPTrainer:
             self.lr_scheduler,
         ) = self.accelerator.prepare(self.model, self.optimizer, self.dataloader, self.lr_scheduler)
 
-        self.outer_optimizer = SGD(
-            self.model.parameters(), lr=config.outer_lr, momentum=config.outer_momentum
-        )
+        try:
+            outer_cls = getattr(optim, config.outer_opt)
+        except AttributeError as e:
+            raise ValueError(f"Unknown optimizer: {config.outer_opt}") from e
+
+        outer_kwargs = {"lr": config.outer_lr}
+        if "momentum" not in config.outer_opt_kwargs:
+            outer_kwargs["momentum"] = config.outer_momentum
+        outer_kwargs.update(config.outer_opt_kwargs)
+        self.outer_optimizer = outer_cls(self.model.parameters(), **outer_kwargs)
 
         if self.accelerator.num_processes > 1:
             device_ids = list(range(self.accelerator.num_processes))
