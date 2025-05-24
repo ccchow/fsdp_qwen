@@ -75,6 +75,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Dataset field containing the text (defaults to auto-detect)",
     )
+    parser.add_argument(
+        "--checkpoint_steps",
+        type=int,
+        default=0,
+        help="Save a checkpoint every N steps (0 disables)",
+    )
+    parser.add_argument(
+        "--resume_checkpoint",
+        default=None,
+        help="Path to a checkpoint to resume from",
+    )
     return parser.parse_args()
 
 
@@ -100,6 +111,8 @@ def main() -> None:
         outer_opt=args.outer_opt,
         outer_opt_kwargs=args.outer_opt_kwargs,
         text_field=args.text_field,
+        checkpoint_steps=args.checkpoint_steps,
+        resume_from=args.resume_checkpoint,
     )
     trainer = DilocoFSDPTrainer(cfg)
     trainer.train()

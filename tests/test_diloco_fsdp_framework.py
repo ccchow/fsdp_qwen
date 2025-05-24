@@ -250,3 +250,37 @@ def test_init_compressed_prev_vector(monkeypatch):
     cfg = df.TrainerConfig('m', 'd', 's', 'out', max_steps=1)
     trainer = df.DilocoFSDPTrainer(cfg, accelerator=dummy_acc)
     assert trainer.prev_vector.dtype == torch.float16
+
+
+def test_checkpoint_save_load(tmp_path):
+    trainer = make_trainer(df.TrainerConfig('m', 'n', 's', 'o'))
+    trainer.accelerator = DummyAccelerator()
+    trainer.accelerator.get_state_dict = lambda m: m.state_dict()
+    trainer.accelerator.unwrap_model = lambda m: m
+    trainer.is_main = True
+    trainer.model = torch.nn.Linear(1, 1)
+    trainer.optimizer = torch.optim.AdamW(trainer.model.parameters())
+    trainer.outer_optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.1)
+    trainer.momentum_buffer = torch.tensor([1.0])
+    orig_params = [p.detach().clone() for p in trainer.model.parameters()]
+    orig_inner = trainer.optimizer.state_dict()
+    orig_outer = trainer.outer_optimizer.state_dict()
+    orig_mb = trainer.momentum_buffer.clone()
+
+    ckpt = tmp_path / 'ckpt.pt'
+    df.DilocoFSDPTrainer.save_checkpoint(trainer, ckpt, step=5)
+    assert ckpt.exists()
+
+    for p in trainer.model.parameters():
+        p.data.add_(1)
+    trainer.optimizer.param_groups[0]['lr'] = 2.0
+    trainer.outer_optimizer.param_groups[0]['lr'] = 3.0
+    trainer.momentum_buffer.add_(2)
+
+    step = df.DilocoFSDPTrainer.load_checkpoint(trainer, ckpt)
+    assert step == 5
+    for p, o in zip(trainer.model.parameters(), orig_params):
+        assert torch.equal(p, o)
+    assert trainer.optimizer.state_dict()['param_groups'][0]['lr'] == orig_inner['param_groups'][0]['lr']
+    assert trainer.outer_optimizer.state_dict()['param_groups'][0]['lr'] == orig_outer['param_groups'][0]['lr']
+    assert torch.equal(trainer.momentum_buffer, orig_mb)
