@@ -287,9 +287,12 @@ class DilocoFSDPTrainer:
                       self.momentum_buffer.mul_(cfg.outer_momentum).add_(delta)
                       delta = self.momentum_buffer
                   delta_gpu = delta.to(self.device, dtype=self.grad_params[0].dtype)
+                  handle = None
                   if self.device_mesh is not None:
-                      self.device_mesh.all_reduce(delta_gpu)
-                      delta_gpu.div_(self.accelerator.num_processes)
+                      pg = self.device_mesh.get_group()
+                      handle = dist.all_reduce(delta_gpu, group=pg, async_op=True)
+                  if handle is not None:
+                      handle.wait()
                   torch.nn.utils.vector_to_parameters(delta_gpu, self.grad_params)
                   for p, g in zip(self.model.parameters(), self.grad_params):
                       p.grad = g.data
