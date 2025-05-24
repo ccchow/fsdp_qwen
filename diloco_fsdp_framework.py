@@ -246,63 +246,76 @@ class DilocoFSDPTrainer:
             range(cfg.max_steps * cfg.diloco_loops), disable=not self.is_main
         )
         self.model.train()
-        for _ in range(cfg.diloco_loops):
-            step = 0
-            for batch in self.dataloader:
-                with self.accelerator.accumulate(self.model):
-                    outputs = self.model(**batch)
-                    loss = outputs.loss
-                    self.accelerator.backward(loss)
-                    if self.accelerator.sync_gradients:
-                        grad_norm = self._grad_norm()
-                        self.optimizer.step()
-                        self.lr_scheduler.step()
-                        self.optimizer.zero_grad()
-                        step += 1
-                        self.global_step += 1
-                        progress_bar.update(1)
-                        if self.is_main:
-                            lr = self.lr_scheduler.get_last_lr()[0] if hasattr(self.lr_scheduler, "get_last_lr") else self.optimizer.param_groups[0]["lr"]
-                            metrics = {
-                                "train/loss": loss.item(),
-                                "lr": lr,
-                                "grad_norm": grad_norm,
-                            }
-                            self._log(metrics, self.global_step)
-                            if step % 20 == 0:
-                                progress_bar.set_description(
-                                    f"loss {loss.item():.4f}"
-                                )
-                        if step >= cfg.max_steps:
-                            break
-            if self.device_mesh is not None:
-                barrier()
-            with torch.no_grad():
-                curr_vector = torch.nn.utils.parameters_to_vector(
-                    [p.detach().cpu() for p in self.model.parameters()]
-                ).to(self.prev_vector.dtype)
-                delta = curr_vector - self.prev_vector
-                if cfg.outer_momentum > 0:
-                    self.momentum_buffer.mul_(cfg.outer_momentum).add_(delta)
-                    delta = self.momentum_buffer
-                delta_gpu = delta.to(self.device, dtype=self.grad_params[0].dtype)
-                if self.device_mesh is not None:
-                    self.device_mesh.all_reduce(delta_gpu)
-                    delta_gpu.div_(self.accelerator.num_processes)
-                torch.nn.utils.vector_to_parameters(delta_gpu, self.grad_params)
-                for p, g in zip(self.model.parameters(), self.grad_params):
-                    p.grad = g.data
-                self.prev_vector.copy_(curr_vector)
-            delta_norm = delta.norm().item()
-            self.outer_optimizer.step()
-            self.outer_optimizer.zero_grad()
+        try:
+          for _ in range(cfg.diloco_loops):
+              step = 0
+              for batch in self.dataloader:
+                  with self.accelerator.accumulate(self.model):
+                      outputs = self.model(**batch)
+                      loss = outputs.loss
+                      self.accelerator.backward(loss)
+                      if self.accelerator.sync_gradients:
+                          grad_norm = self._grad_norm()
+                          self.optimizer.step()
+                          self.lr_scheduler.step()
+                          self.optimizer.zero_grad()
+                          step += 1
+                          self.global_step += 1
+                          progress_bar.update(1)
+                          if self.is_main:
+                              lr = self.lr_scheduler.get_last_lr()[0] if hasattr(self.lr_scheduler, "get_last_lr") else self.optimizer.param_groups[0]["lr"]
+                              metrics = {
+                                  "train/loss": loss.item(),
+                                  "lr": lr,
+                                  "grad_norm": grad_norm,
+                              }
+                              self._log(metrics, self.global_step)
+                              if step % 20 == 0:
+                                  progress_bar.set_description(
+                                      f"loss {loss.item():.4f}"
+                                  )
+                          if step >= cfg.max_steps:
+                              break
+              if self.device_mesh is not None:
+                  barrier()
+              with torch.no_grad():
+                  curr_vector = torch.nn.utils.parameters_to_vector(
+                      [p.detach().cpu() for p in self.model.parameters()]
+                  ).to(self.prev_vector.dtype)
+                  delta = curr_vector - self.prev_vector
+                  if cfg.outer_momentum > 0:
+                      self.momentum_buffer.mul_(cfg.outer_momentum).add_(delta)
+                      delta = self.momentum_buffer
+                  delta_gpu = delta.to(self.device, dtype=self.grad_params[0].dtype)
+                  if self.device_mesh is not None:
+                      self.device_mesh.all_reduce(delta_gpu)
+                      delta_gpu.div_(self.accelerator.num_processes)
+                  torch.nn.utils.vector_to_parameters(delta_gpu, self.grad_params)
+                  for p, g in zip(self.model.parameters(), self.grad_params):
+                      p.grad = g.data
+                  self.prev_vector.copy_(curr_vector)
+              delta_norm = delta.norm().item()
+              self.outer_optimizer.step()
+              self.outer_optimizer.zero_grad()
+              if self.is_main:
+                  self._log({"outer/delta_norm": delta_norm}, self.global_step)
+                  if cfg.eval_batches > 0:
+                      val_loss = self._validate(cfg.eval_batches)
+                      self._log({"val/loss": val_loss}, self.global_step)
+              for p in self.model.parameters():
+                  p.grad = None
+        except KeyboardInterrupt:
             if self.is_main:
-                self._log({"outer/delta_norm": delta_norm}, self.global_step)
-                if cfg.eval_batches > 0:
-                    val_loss = self._validate(cfg.eval_batches)
-                    self._log({"val/loss": val_loss}, self.global_step)
-            for p in self.model.parameters():
-                p.grad = None
+                print("\n⚠️  Training interrupted. Saving checkpoint...")
+            self._save_final()
+            return
+        except RuntimeError as e:
+            if self.is_main:
+                print(f"\n❌  RuntimeError during training: {e}")
+                print("Attempting graceful shutdown...")
+            self.accelerator.wait_for_everyone()
+            return
+
         self._save_final()
         if self.writer is not None and self.config.log_with == "tensorboard":
             self.writer.close()
