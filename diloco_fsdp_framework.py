@@ -46,6 +46,10 @@ class TrainerConfig:
     outer_lr: float = 1e-3
     outer_momentum: float = 0.0
     text_field: Optional[str] = None
+    num_workers: int = 0
+    dynamic_batch: bool = False
+    seed: int = 0
+    shuffle_buffer: int = 10_000
 
 
 class DilocoFSDPTrainer:
@@ -97,10 +101,16 @@ class DilocoFSDPTrainer:
         # --- Dataset streaming ---
         self.raw_dataset, self.text_field = self._get_dataset()
         self.collate_fn = partial(
-            self._tokenize_batch, text_field=self.text_field, seq_len=config.seq_len
+            self._tokenize_batch,
+            text_field=self.text_field,
+            seq_len=config.seq_len,
+            dynamic_batch=config.dynamic_batch,
         )
         self.dataloader = DataLoader(
-            self.raw_dataset, batch_size=config.batch_size, collate_fn=self.collate_fn
+            self.raw_dataset,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            collate_fn=self.collate_fn,
         )
 
         # --- Optimizer & scheduler ---
@@ -153,6 +163,7 @@ class DilocoFSDPTrainer:
             split="train",
             streaming=True,
         )
+        ds = ds.shuffle(self.config.shuffle_buffer, seed=self.config.seed)
         first = next(iter(ds.take(1)))
         if self.config.text_field:
             if self.config.text_field not in first:
@@ -170,13 +181,13 @@ class DilocoFSDPTrainer:
         return ds, field
 
     # ------------------------------------------------------------------
-    def _tokenize_batch(self, examples, text_field: str, seq_len: int):
+    def _tokenize_batch(self, examples, text_field: str, seq_len: int, dynamic_batch: bool):
         texts = [ex[text_field] for ex in examples]
         tokens = self.tokenizer(
             texts,
             max_length=seq_len,
             truncation=True,
-            padding="max_length",
+            padding=True if dynamic_batch else "max_length",
             return_tensors="pt",
         )
         tokens["labels"] = tokens["input_ids"].clone()
