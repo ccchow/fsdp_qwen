@@ -227,7 +227,7 @@ class DilocoFSDPTrainer:
             split="train",
             streaming=True,
         )
-        ds = ds.shuffle(self.config.shuffle_buffer, seed=self.config.seed)
+        ds = ds.shuffle(buffer_size=self.config.shuffle_buffer, seed=self.config.seed)
         first = next(iter(ds.take(1)))
         if self.config.text_field:
             if self.config.text_field not in first:
