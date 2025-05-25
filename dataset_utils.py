@@ -23,7 +23,7 @@ class DatasetLoader:
             split="train",
             streaming=True,
         )
-        ds = ds.shuffle(self.shuffle_buffer, seed=self.seed)
+        ds = ds.shuffle(buffer_size=self.shuffle_buffer, seed=self.seed)
         first = next(iter(ds.take(1)))
         if self.text_field:
             if self.text_field not in first:
