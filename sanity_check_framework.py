@@ -56,6 +56,7 @@ def evaluate(trainer: DilocoFSDPTrainer, num_batches: int) -> None:
         if i >= num_batches:
             break
         with torch.no_grad():
+            batch = {k: v.to(trainer.device) for k, v in batch.items()}
             outputs = trainer.model(**batch)
             loss = outputs.loss.item()
             if math.isfinite(loss):
