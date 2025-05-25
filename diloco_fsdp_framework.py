@@ -14,20 +14,22 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Iterable, Tuple, Optional
+from typing import Optional
 from copy import deepcopy
 
 import torch
-from datasets import load_dataset, IterableDataset
+from datasets import IterableDataset
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.distributed import barrier
 from torch.distributed.device_mesh import DeviceMesh
 import torch.distributed as dist
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_scheduler
 from accelerate import Accelerator
 from accelerate.utils import FullyShardedDataParallelPlugin
 from tqdm.auto import tqdm
+
+from dataset_utils import DatasetLoader
+from outer_optimizer import OuterOptimizer
 
 
 @dataclass
@@ -136,9 +138,17 @@ class DilocoFSDPTrainer:
         self.model.gradient_checkpointing_enable()
 
         # --- Dataset streaming ---
-        self.raw_dataset, self.text_field = self._get_dataset()
+        self.dataset_loader = DatasetLoader(
+            config.dataset_name,
+            config.subset,
+            text_field=config.text_field,
+            shuffle_buffer=config.shuffle_buffer,
+            seed=config.seed,
+        )
+        self.raw_dataset, self.text_field = self.dataset_loader.load()
         self.collate_fn = partial(
-            self._tokenize_batch,
+            DatasetLoader.tokenize_batch,
+            self.tokenizer,
             text_field=self.text_field,
             seq_len=config.seq_len,
             dynamic_batch=config.dynamic_batch,
@@ -182,16 +192,17 @@ class DilocoFSDPTrainer:
         if "momentum" not in config.outer_opt_kwargs:
             outer_kwargs["momentum"] = config.outer_momentum
         outer_kwargs.update(config.outer_opt_kwargs)
-        self.outer_optimizer = outer_cls(self.model.parameters(), **outer_kwargs)
+        base_outer = outer_cls(self.model.parameters(), **outer_kwargs)
+        self.outer_optimizer = base_outer
         if config.outer_lr_schedule:
-            self.outer_lr_scheduler = get_scheduler(
+            outer_sched = get_scheduler(
                 config.outer_lr_schedule,
-                optimizer=self.outer_optimizer,
+                optimizer=base_outer,
                 num_warmup_steps=0,
                 num_training_steps=config.diloco_loops,
             )
         else:
-            self.outer_lr_scheduler = None
+            outer_sched = None
 
         if self.accelerator.num_processes > 1:
             device_ids = list(range(self.accelerator.num_processes))
@@ -199,73 +210,31 @@ class DilocoFSDPTrainer:
         else:
             self.device_mesh = None
 
-        # Store a compressed snapshot of the parameters to reduce memory
-        # overhead.  Using float16 provides a reasonable trade-off between
-        # precision and size and avoids cloning the full parameter tensors.
-        with torch.no_grad():
-            params = [p.detach().cpu().to(torch.float16) for p in self.model.parameters()]
-            self.prev_vector = torch.nn.utils.parameters_to_vector(params)
-        if config.outer_momentum > 0:
-            self.momentum_buffer = torch.zeros_like(self.prev_vector)
-        else:
-            self.momentum_buffer = None
-
-        self.grad_params = [
-            torch.nn.Parameter(torch.zeros_like(p), requires_grad=False)
-            for p in self.model.parameters()
-        ]
+        self.outer_opt = OuterOptimizer(
+            self.model,
+            base_outer,
+            device=self.device,
+            device_mesh=self.device_mesh,
+            momentum=config.outer_momentum,
+            grad_clip=config.outer_grad_clip,
+            lr_scheduler=outer_sched,
+        )
 
         self.start_step = 0
         if config.resume_from:
             self.start_step = self.load_checkpoint(config.resume_from)
 
     # ------------------------------------------------------------------
-    def _get_dataset(self) -> Tuple[IterableDataset, str]:
-        ds = load_dataset(
-            self.config.dataset_name,
-            name=self.config.subset,
-            split="train",
-            streaming=True,
-        )
-        ds = ds.shuffle(buffer_size=self.config.shuffle_buffer, seed=self.config.seed)
-        first = next(iter(ds.take(1)))
-        if self.config.text_field:
-            if self.config.text_field not in first:
-                raise ValueError(f"Dataset has no field '{self.config.text_field}'")
-            field = self.config.text_field
-        else:
-            if "text" in first:
-                field = "text"
-            elif "content" in first:
-                field = "content"
-            else:
-                raise ValueError(
-                    "Dataset must contain a 'text' or 'content' field; use text_field param"
-                )
-        return ds, field
-
-    # ------------------------------------------------------------------
-    def _tokenize_batch(self, examples, text_field: str, seq_len: int, dynamic_batch: bool):
-        texts = [ex[text_field] for ex in examples]
-        tokens = self.tokenizer(
-            texts,
-            max_length=seq_len,
-            truncation=True,
-            padding=True if dynamic_batch else "max_length",
-            return_tensors="pt",
-        )
-        tokens["labels"] = tokens["input_ids"].clone()
-        return tokens
-
-    # ------------------------------------------------------------------
     def save_checkpoint(self, path: str, step: int) -> None:
         """Save model and optimizer states."""
         self.accelerator.wait_for_everyone()
+        outer_state = self.outer_opt.state_dict()
         state = {
             "model": self.accelerator.get_state_dict(self.model),
             "optimizer": deepcopy(self.optimizer.state_dict()),
-            "outer_optimizer": deepcopy(self.outer_optimizer.state_dict()),
-            "momentum_buffer": self.momentum_buffer.clone() if self.momentum_buffer is not None else None,
+            "outer_optimizer": outer_state.optimizer,
+            "prev_vector": outer_state.prev_vector,
+            "momentum_buffer": outer_state.momentum_buffer,
             "step": step,
         }
         if self.is_main:
@@ -279,9 +248,10 @@ class DilocoFSDPTrainer:
         unwrapped = self.accelerator.unwrap_model(self.model)
         unwrapped.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.outer_optimizer.load_state_dict(ckpt["outer_optimizer"])
-        if self.momentum_buffer is not None and ckpt.get("momentum_buffer") is not None:
-            self.momentum_buffer.copy_(ckpt["momentum_buffer"])
+        self.outer_opt.optimizer.load_state_dict(ckpt["outer_optimizer"])
+        self.outer_opt.prev_vector.copy_(ckpt["prev_vector"])
+        if self.outer_opt.momentum_buffer is not None and ckpt.get("momentum_buffer") is not None:
+            self.outer_opt.momentum_buffer.copy_(ckpt["momentum_buffer"])
         return int(ckpt.get("step", 0))
 
     def _log(self, metrics: dict, step: int) -> None:
@@ -365,37 +335,7 @@ class DilocoFSDPTrainer:
                                   )
                           if inner >= cfg.max_steps:
                               break
-              if self.device_mesh is not None:
-                  barrier()
-              with torch.no_grad():
-                  curr_vector = torch.nn.utils.parameters_to_vector(
-                      [p.detach().cpu() for p in self.model.parameters()]
-                  ).to(self.prev_vector.dtype)
-                  delta = curr_vector - self.prev_vector
-                  if cfg.outer_momentum > 0:
-                      self.momentum_buffer.mul_(cfg.outer_momentum).add_(delta)
-                      delta = self.momentum_buffer
-                  delta_gpu = delta.to(self.device, dtype=self.grad_params[0].dtype)
-                  handle = None
-                  if self.device_mesh is not None:
-                      pg = self.device_mesh.get_group()
-                      handle = dist.all_reduce(delta_gpu, group=pg, async_op=True)
-                  if handle is not None:
-                      handle.wait()
-                  torch.nn.utils.vector_to_parameters(delta_gpu, self.grad_params)
-                  for p, g in zip(self.model.parameters(), self.grad_params):
-                      p.grad = g.data
-                  self.prev_vector.copy_(curr_vector)
-              delta_norm = delta.norm().item()
-              if cfg.outer_grad_clip:
-                  torch.nn.utils.clip_grad_norm_(
-                      self.model.parameters(), cfg.outer_grad_clip
-                  )
-              self.outer_optimizer.step()
-              scheduler = getattr(self, "outer_lr_scheduler", None)
-              if scheduler is not None:
-                  scheduler.step()
-              self.outer_optimizer.zero_grad()
+              delta_norm = self.outer_opt.step()
               if self.is_main:
                   self._log({"outer/delta_norm": delta_norm}, self.global_step)
                   if cfg.eval_batches > 0:

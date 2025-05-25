@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 import diloco_fsdp_framework as df
+from dataset_utils import DatasetLoader
+from outer_optimizer import OuterOptimizer
 
 
 class DummyDataset:
@@ -67,13 +69,13 @@ def test_get_dataset_detects_text(monkeypatch):
     def fake_load_dataset(*args, **kwargs):
         return ds
 
-    monkeypatch.setattr(df, 'load_dataset', fake_load_dataset)
-    cfg = df.TrainerConfig('model', 'name', 'subset', 'out')
-    trainer = make_trainer(cfg)
-    dataset, field = df.DilocoFSDPTrainer._get_dataset(trainer)
+    import dataset_utils
+    monkeypatch.setattr(dataset_utils, 'load_dataset', fake_load_dataset)
+    loader = DatasetLoader('name', 'subset', shuffle_buffer=10, seed=42)
+    dataset, field = loader.load()
     assert dataset is ds
     assert field == 'text'
-    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
+    assert ds.shuffled_with == (loader.shuffle_buffer, loader.seed)
 
 
 def test_get_dataset_detects_content(monkeypatch):
@@ -82,12 +84,12 @@ def test_get_dataset_detects_content(monkeypatch):
     def fake_load_dataset(*args, **kwargs):
         return ds
 
-    monkeypatch.setattr(df, 'load_dataset', fake_load_dataset)
-    cfg = df.TrainerConfig('model', 'name', 'subset', 'out')
-    trainer = make_trainer(cfg)
-    dataset, field = df.DilocoFSDPTrainer._get_dataset(trainer)
+    import dataset_utils
+    monkeypatch.setattr(dataset_utils, 'load_dataset', fake_load_dataset)
+    loader = DatasetLoader('name', 'subset')
+    dataset, field = loader.load()
     assert field == 'content'
-    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
+    assert ds.shuffled_with == (loader.shuffle_buffer, loader.seed)
 
 
 def test_get_dataset_custom_field(monkeypatch):
@@ -96,12 +98,12 @@ def test_get_dataset_custom_field(monkeypatch):
     def fake_load_dataset(*args, **kwargs):
         return ds
 
-    monkeypatch.setattr(df, 'load_dataset', fake_load_dataset)
-    cfg = df.TrainerConfig('model', 'name', 'subset', 'out', text_field='foo')
-    trainer = make_trainer(cfg)
-    dataset, field = df.DilocoFSDPTrainer._get_dataset(trainer)
+    import dataset_utils
+    monkeypatch.setattr(dataset_utils, 'load_dataset', fake_load_dataset)
+    loader = DatasetLoader('name', 'subset', text_field='foo')
+    dataset, field = loader.load()
     assert field == 'foo'
-    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
+    assert ds.shuffled_with == (loader.shuffle_buffer, loader.seed)
 
 
 def test_get_dataset_invalid_field(monkeypatch):
@@ -110,12 +112,12 @@ def test_get_dataset_invalid_field(monkeypatch):
     def fake_load_dataset(*args, **kwargs):
         return ds
 
-    monkeypatch.setattr(df, 'load_dataset', fake_load_dataset)
-    cfg = df.TrainerConfig('m', 'n', 's', 'o', text_field='bar')
-    trainer = make_trainer(cfg)
+    import dataset_utils
+    monkeypatch.setattr(dataset_utils, 'load_dataset', fake_load_dataset)
+    loader = DatasetLoader('name', 'subset', text_field='bar')
     with pytest.raises(ValueError):
-        df.DilocoFSDPTrainer._get_dataset(trainer)
-    assert ds.shuffled_with == (cfg.shuffle_buffer, cfg.seed)
+        loader.load()
+    assert ds.shuffled_with == (loader.shuffle_buffer, loader.seed)
 
 
 def test_trainer_config_validation():
@@ -133,11 +135,9 @@ def test_trainer_config_validation():
 
 def test_tokenize_batch():
     tokenizer = DummyTokenizer()
-    trainer = make_trainer(df.TrainerConfig('m', 'n', 's', 'o'))
-    trainer.tokenizer = tokenizer
     examples = [{'txt': 'hello'}, {'txt': 'world'}]
-    tokens = df.DilocoFSDPTrainer._tokenize_batch(
-        trainer, examples, text_field='txt', seq_len=3, dynamic_batch=False
+    tokens = DatasetLoader.tokenize_batch(
+        tokenizer, examples, text_field='txt', seq_len=3, dynamic_batch=False
     )
     assert tokens['input_ids'].shape == (2, 3)
     assert torch.equal(tokens['labels'], tokens['input_ids'])
@@ -206,20 +206,18 @@ def test_train_bf16_dtype():
     trainer.model = DummyModel().to(torch.bfloat16)
     trainer.optimizer = torch.optim.AdamW(trainer.model.parameters(), lr=0.1)
     trainer.lr_scheduler = SimpleNamespace(step=lambda: None)
-    trainer.outer_optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.1)
+    trainer.outer_opt = OuterOptimizer(
+        trainer.model,
+        torch.optim.SGD(trainer.model.parameters(), lr=0.1),
+        device=trainer.device,
+        device_mesh=None,
+    )
+    trainer.outer_optimizer = trainer.outer_opt.optimizer
     batch = {
         'input_ids': torch.ones(1, 2, dtype=torch.long),
         'labels': torch.ones(1, 2, dtype=torch.long),
     }
     trainer.dataloader = [batch]
-    trainer.prev_vector = torch.nn.utils.parameters_to_vector(
-        [p.detach().cpu().clone() for p in trainer.model.parameters()]
-    )
-    trainer.grad_params = [
-        torch.nn.Parameter(torch.zeros_like(p), requires_grad=False)
-        for p in trainer.model.parameters()
-    ]
-    trainer.momentum_buffer = None
     trainer._save_final = lambda: None
 
     df.DilocoFSDPTrainer.train(trainer)
@@ -227,7 +225,8 @@ def test_train_bf16_dtype():
 def test_init_compressed_prev_vector(monkeypatch):
     ds = DummyDataset([{'text': 'a'}])
 
-    monkeypatch.setattr(df, 'load_dataset', lambda *a, **k: ds)
+    import dataset_utils
+    monkeypatch.setattr(dataset_utils, 'load_dataset', lambda *a, **k: ds)
     monkeypatch.setattr(df.AutoTokenizer, 'from_pretrained', lambda *a, **k: DummyTokenizer())
 
     def fake_model(*args, **kwargs):
@@ -249,7 +248,7 @@ def test_init_compressed_prev_vector(monkeypatch):
 
     cfg = df.TrainerConfig('m', 'd', 's', 'out', max_steps=1)
     trainer = df.DilocoFSDPTrainer(cfg, accelerator=dummy_acc)
-    assert trainer.prev_vector.dtype == torch.float16
+    assert trainer.outer_opt.prev_vector.dtype == torch.float16
 
 
 def test_checkpoint_save_load(tmp_path):
@@ -260,12 +259,19 @@ def test_checkpoint_save_load(tmp_path):
     trainer.is_main = True
     trainer.model = torch.nn.Linear(1, 1)
     trainer.optimizer = torch.optim.AdamW(trainer.model.parameters())
-    trainer.outer_optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.1)
-    trainer.momentum_buffer = torch.tensor([1.0])
+    trainer.outer_opt = OuterOptimizer(
+        trainer.model,
+        torch.optim.SGD(trainer.model.parameters(), lr=0.1),
+        device=torch.device('cpu'),
+        device_mesh=None,
+        momentum=0.0,
+    )
+    trainer.outer_optimizer = trainer.outer_opt.optimizer
+    trainer.outer_opt.momentum_buffer = torch.tensor([1.0])
     orig_params = [p.detach().clone() for p in trainer.model.parameters()]
     orig_inner = trainer.optimizer.state_dict()
     orig_outer = trainer.outer_optimizer.state_dict()
-    orig_mb = trainer.momentum_buffer.clone()
+    orig_mb = trainer.outer_opt.momentum_buffer.clone()
 
     ckpt = tmp_path / 'ckpt.pt'
     df.DilocoFSDPTrainer.save_checkpoint(trainer, ckpt, step=5)
@@ -275,7 +281,7 @@ def test_checkpoint_save_load(tmp_path):
         p.data.add_(1)
     trainer.optimizer.param_groups[0]['lr'] = 2.0
     trainer.outer_optimizer.param_groups[0]['lr'] = 3.0
-    trainer.momentum_buffer.add_(2)
+    trainer.outer_opt.momentum_buffer.add_(2)
 
     step = df.DilocoFSDPTrainer.load_checkpoint(trainer, ckpt)
     assert step == 5
@@ -283,4 +289,19 @@ def test_checkpoint_save_load(tmp_path):
         assert torch.equal(p, o)
     assert trainer.optimizer.state_dict()['param_groups'][0]['lr'] == orig_inner['param_groups'][0]['lr']
     assert trainer.outer_optimizer.state_dict()['param_groups'][0]['lr'] == orig_outer['param_groups'][0]['lr']
-    assert torch.equal(trainer.momentum_buffer, orig_mb)
+    assert torch.equal(trainer.outer_opt.momentum_buffer, orig_mb)
+
+
+def test_outer_optimizer_step():
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.zero_()
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    outer = OuterOptimizer(model, opt, device=torch.device('cpu'), device_mesh=None)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(1.0)
+    delta_norm = outer.step()
+    assert pytest.approx(delta_norm, rel=1e-5) == 1.0
+    for p in model.parameters():
+        assert torch.allclose(p, torch.tensor([[0.9]]), atol=1e-4)

@@ -6,7 +6,7 @@ The `TrainerConfig` dataclass in `diloco_fsdp_framework.py` provides comprehensi
 
 ### Key Concepts
 
-- **Inner Loop**: Standard gradient descent steps using your chosen optimizer (e.g., AdamW)
+- **Inner Loop**: Standard gradient descent steps using chosen optimizer (e.g., AdamW)
 - **Outer Loop**: DiLoCo synchronization steps that coordinate updates across distributed workers
 - **FSDP**: Memory-efficient model sharding that enables training larger models than would fit on a single GPU
 
