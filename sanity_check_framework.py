@@ -5,6 +5,7 @@ import argparse
 import math
 import time
 import torch
+from torch.utils.data import DataLoader
 
 from diloco_fsdp_framework import DilocoFSDPTrainer, TrainerConfig
 
