@@ -37,12 +37,21 @@ def parse_args() -> argparse.Namespace:
 def evaluate(trainer: DilocoFSDPTrainer, num_batches: int) -> None:
     """Run a few batches in eval mode and print perplexity.
 
-    Any non-finite losses are skipped. If no finite losses are found, a warning
-    is printed instead of raising an error.
+    A fresh dataloader is constructed so evaluation starts from the beginning of
+    the streaming dataset. Any non-finite losses are skipped. If no valid losses
+    are found, a warning is printed instead of raising an error.
     """
     trainer.model.eval()
+
+    eval_loader = DataLoader(
+        trainer.raw_dataset,
+        batch_size=trainer.config.batch_size,
+        num_workers=trainer.config.num_workers,
+        collate_fn=trainer.collate_fn,
+    )
+
     losses: list[float] = []
-    for i, batch in enumerate(trainer.dataloader):
+    for i, batch in enumerate(eval_loader):
         if i >= num_batches:
             break
         with torch.no_grad():
@@ -50,10 +59,13 @@ def evaluate(trainer: DilocoFSDPTrainer, num_batches: int) -> None:
             loss = outputs.loss.item()
             if math.isfinite(loss):
                 losses.append(loss)
+
     trainer.model.train()
+
     if not losses:
         print("\nEval produced NaN/Inf loss.")
         return
+
     mean_loss = sum(losses) / len(losses)
     ppl = math.exp(mean_loss)
     print(f"\nEval perplexity over {len(losses)} batches: {ppl:.2f}")
