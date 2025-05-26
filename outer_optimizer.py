@@ -76,16 +76,22 @@ class OuterOptimizer:
             if self.momentum_buffer is not None:
                 self.momentum_buffer.mul_(self.momentum).add_(delta)
                 delta = self.momentum_buffer
-            delta_gpu = delta.to(self.device, dtype=self.grad_params[0].dtype)
+            delta_gpu = delta.to(self.device)
             handle = None
             if self.device_mesh is not None:
                 pg = self.device_mesh.get_group()
                 handle = dist.all_reduce(delta_gpu, group=pg, async_op=True)
             if handle is not None:
                 handle.wait()
-            torch.nn.utils.vector_to_parameters(delta_gpu, self.grad_params)
+            offset = 0
             for p, g in zip(self.model.parameters(), self.grad_params):
+                n = p.numel()
+                slice_ = delta_gpu[offset:offset + n].view_as(p).to(p.dtype)
+                if g.dtype != p.dtype:
+                    g.data = torch.zeros_like(p)
+                g.data.copy_(slice_)
                 p.grad = g.data
+                offset += n
             self.prev_vector.copy_(curr_vector)
         delta_norm = delta.norm().item()
         if self.grad_clip:
