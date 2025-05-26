@@ -5,7 +5,7 @@ distributed_type: FSDP
 num_machines: 1
 machine_rank: 0
 num_processes: 1          # single GPU
-gpu_ids: 0                # or omit → "all"
+gpu_ids: all                # or omit → "all"
 
 mixed_precision: bf16     # switch to fp16 if your GPUs/driver lack BF16
 downcast_bf16: "no"
