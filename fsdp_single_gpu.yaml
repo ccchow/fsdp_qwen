@@ -11,11 +11,12 @@ mixed_precision: bf16     # switch to fp16 if your GPUs/driver lack BF16
 downcast_bf16: "no"
 
 fsdp_config:
-  fsdp_sharding_strategy: FULL_SHARD
-  fsdp_offload_params: true        # true only if you STILL OOM
+  fsdp_sharding_strategy: NO_SHARD  # Use NO_SHARD explicitly for single GPU
+  fsdp_offload_params: false        # Disable offloading for single GPU
   fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
   # fully-qualified path so Accelerate can import it itself:
-  # fsdp_transformer_layer_cls_to_wrap: transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer
+  fsdp_transformer_layer_cls_to_wrap: transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer
   fsdp_backward_prefetch: BACKWARD_PRE
-  fsdp_state_dict_type: SHARDED_STATE_DICT
+  fsdp_state_dict_type: FULL_STATE_DICT  # Use FULL_STATE_DICT for single GPU
   fsdp_sync_module_states: true
+  fsdp_use_orig_params: true  # This helps with parameter shape consistency
