@@ -305,3 +305,40 @@ def test_outer_optimizer_step():
     assert pytest.approx(delta_norm, rel=1e-5) == 1.0
     for p in model.parameters():
         assert torch.allclose(p, torch.tensor([[0.9]]), atol=1e-4)
+
+
+def test_outer_optimizer_mixed_dtypes():
+    class MixedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p32 = torch.nn.Parameter(torch.tensor([0.0], dtype=torch.float32))
+            self.p16 = torch.nn.Parameter(torch.tensor([0.0], dtype=torch.float16))
+
+    model = MixedModel()
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    outer = OuterOptimizer(model, opt, device=torch.device('cpu'), device_mesh=None)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(1.0)
+    delta_norm = outer.step()
+    expected = torch.tensor([1.0, 1.0], dtype=torch.float16).norm().item()
+    assert pytest.approx(delta_norm, rel=1e-5) == expected
+    assert outer.grad_params[0].dtype == torch.float32
+    assert outer.grad_params[1].dtype == torch.float16
+    assert torch.allclose(model.p32, torch.tensor([0.9], dtype=torch.float32))
+    assert torch.allclose(model.p16, torch.tensor([0.9], dtype=torch.float16))
+
+
+def test_outer_optimizer_dtype_change_after_init():
+    model = torch.nn.Linear(1, 1, bias=False).half()
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+    outer = OuterOptimizer(model, opt, device=torch.device('cpu'), device_mesh=None)
+    model.float()  # change parameter dtype after init
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(1.0)
+    delta_norm = outer.step()
+    assert pytest.approx(delta_norm, rel=1e-5) == 1.0
+    for p in model.parameters():
+        assert p.grad.dtype == p.dtype
+    assert outer.grad_params[0].dtype == model.weight.dtype
