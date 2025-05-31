@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Optional
+from typing import Optional, Union, Callable
 from copy import deepcopy
 
 import torch
@@ -64,6 +64,14 @@ class TrainerConfig:
     dynamic_batch: bool = False
     seed: int = 0
     shuffle_buffer: int = 10_000
+    
+    # FSDP2-specific configuration
+    fsdp_reshard_after_forward: bool = True
+    fsdp_auto_wrap_policy: Optional[Union[Callable, str]] = "transformer_based_wrap"
+    fsdp_cpu_offload: bool = False
+    fsdp_mixed_precision: Optional[str] = "bf16"
+    fsdp_transformer_layer_cls_to_wrap: Optional[list[str]] = None
+    fsdp_min_num_params: Optional[int] = None
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
@@ -73,6 +81,8 @@ class TrainerConfig:
             raise ValueError("outer_momentum must be between 0.0 and 1.0")
         if self.lr <= 0 or self.outer_lr <= 0:
             raise ValueError("learning rate values must be positive")
+        if self.fsdp_auto_wrap_policy not in [None, "transformer_based_wrap", "size_based_wrap", "no_wrap"] and not callable(self.fsdp_auto_wrap_policy):
+            raise ValueError("fsdp_auto_wrap_policy must be a callable or one of: transformer_based_wrap, size_based_wrap, no_wrap")
 
 
 class DilocoFSDPTrainer:
@@ -82,10 +92,43 @@ class DilocoFSDPTrainer:
         self.config = config
 
         if accelerator is None:
-            self._fsdp_plugin = FullyShardedDataParallelPlugin()
+            # Set up mixed precision policy for FSDP2
+            mixed_precision_policy = None
+            if config.fsdp_mixed_precision:
+                dtype_map = {
+                    "fp16": torch.float16,
+                    "bf16": torch.bfloat16,
+                }
+                if config.fsdp_mixed_precision in dtype_map:
+                    mixed_precision_policy = {
+                        "param_dtype": dtype_map[config.fsdp_mixed_precision],
+                        "reduce_dtype": dtype_map[config.fsdp_mixed_precision],
+                        "buffer_dtype": dtype_map[config.fsdp_mixed_precision],
+                    }
+
+            # Configure FSDP plugin with FSDP2 options
+            fsdp_kwargs = {
+                "fsdp_version": 2,
+                "reshard_after_forward": config.fsdp_reshard_after_forward,
+                "auto_wrap_policy": config.fsdp_auto_wrap_policy,
+                "cpu_offload": config.fsdp_cpu_offload,
+            }
+
+            if mixed_precision_policy:
+                fsdp_kwargs["mixed_precision_policy"] = mixed_precision_policy
+
+            if config.fsdp_transformer_layer_cls_to_wrap:
+                fsdp_kwargs["transformer_cls_names_to_wrap"] = config.fsdp_transformer_layer_cls_to_wrap
+
+            if config.fsdp_min_num_params is not None:
+                fsdp_kwargs["min_num_params"] = config.fsdp_min_num_params
+
+            self._fsdp_plugin = FullyShardedDataParallelPlugin(**fsdp_kwargs)
+
             self.accelerator = Accelerator(
                 gradient_accumulation_steps=config.grad_accum,
                 fsdp_plugin=self._fsdp_plugin,
+                mixed_precision=config.fsdp_mixed_precision,
             )
         else:
             self.accelerator = accelerator
