@@ -45,7 +45,7 @@ class TrainerConfig:
     grad_accum: int = 8
     lr: float = 2e-5
     max_steps: int = 10_000
-    diloco_loops: int = 1
+    diloco_loops: int = 2
     outer_lr: float = 1e-3
     outer_momentum: float = 0.0
     outer_lr_schedule: Optional[str] = None
@@ -69,7 +69,7 @@ class TrainerConfig:
     fsdp_reshard_after_forward: bool = True
     fsdp_auto_wrap_policy: Optional[Union[Callable, str]] = "transformer_based_wrap"
     fsdp_cpu_offload: bool = False
-    fsdp_mixed_precision: Optional[str] = "bf16"
+    fsdp_mixed_precision: Optional[str] = "fp16"
     fsdp_transformer_layer_cls_to_wrap: Optional[list[str]] = None
     fsdp_min_num_params: Optional[int] = None
 
@@ -100,10 +100,14 @@ class DilocoFSDPTrainer:
                     "bf16": torch.bfloat16,
                 }
                 if config.fsdp_mixed_precision in dtype_map:
+                    compute_dtype = dtype_map[config.fsdp_mixed_precision]
+                    # Use the same dtype for all operations to avoid upcasting
                     mixed_precision_policy = {
-                        "param_dtype": dtype_map[config.fsdp_mixed_precision],
-                        "reduce_dtype": dtype_map[config.fsdp_mixed_precision],
-                        "buffer_dtype": dtype_map[config.fsdp_mixed_precision],
+                        "param_dtype": compute_dtype,
+                        "reduce_dtype": compute_dtype,
+                        "output_dtype": compute_dtype,
+                        # Keep computation in the same precision
+                        # "keep_low_precision_grads": True,
                     }
 
             # Configure FSDP plugin with FSDP2 options
@@ -112,6 +116,7 @@ class DilocoFSDPTrainer:
                 "reshard_after_forward": config.fsdp_reshard_after_forward,
                 "auto_wrap_policy": config.fsdp_auto_wrap_policy,
                 "cpu_offload": config.fsdp_cpu_offload,
+                "use_orig_params": True,  # Important for FSDP2
             }
 
             if mixed_precision_policy:
@@ -125,6 +130,8 @@ class DilocoFSDPTrainer:
 
             self._fsdp_plugin = FullyShardedDataParallelPlugin(**fsdp_kwargs)
 
+            # Don't pass mixed_precision to Accelerator when using FSDP2
+            # as it's handled by the FSDP plugin
             self.accelerator = Accelerator(
                 gradient_accumulation_steps=config.grad_accum,
                 fsdp_plugin=self._fsdp_plugin,
@@ -170,11 +177,17 @@ class DilocoFSDPTrainer:
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+        # Load model with the appropriate dtype
+        model_dtype = torch.float32  # Default
+        if config.fsdp_mixed_precision == "bf16":
+            model_dtype = torch.bfloat16
+        elif config.fsdp_mixed_precision == "fp16":
+            model_dtype = torch.float16
+            
         self.model = AutoModelForCausalLM.from_pretrained(
             config.model_name,
-            torch_dtype=torch.bfloat16
-            if self.accelerator.mixed_precision == "bf16"
-            else torch.float16,
+            torch_dtype=model_dtype,
             trust_remote_code=True,
         )
         self.model.config.use_cache = False
