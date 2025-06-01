@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 
 
 @dataclass
@@ -62,11 +63,15 @@ class OuterOptimizer:
 
         self.grad_params = []
         for p in model.parameters():
-            # Create gradient parameters on CPU to avoid DTensor issues
-            grad_param = torch.nn.Parameter(
-                torch.zeros_like(p, device='cpu'), 
-                requires_grad=False
+            # Create gradient parameters on CPU using the local shard shape
+            if hasattr(p, "to_local"):
+                local_shape = p.to_local().shape
+            else:
+                local_shape = p.shape
+            grad_tensor = torch.zeros(
+                local_shape, dtype=p.dtype, device="cpu"
             )
+            grad_param = torch.nn.Parameter(grad_tensor, requires_grad=False)
             self.grad_params.append(grad_param)
 
     # ------------------------------------------------------------------
@@ -119,23 +124,30 @@ class OuterOptimizer:
                 handle.wait()
             offset = 0
             for p, g in zip(self.model.parameters(), self.grad_params):
-                n = p.numel()
-                slice_ = delta_gpu[offset:offset + n].view_as(p).to(p.dtype)
-                # Ensure gradient parameter has the right dtype and device
-                if g.device != p.device or g.dtype != p.dtype:
-                    g.data = torch.zeros_like(p)
-                # Try to copy safely, handling potential DTensor issues
+                local_tensor = p.to_local() if hasattr(p, "to_local") else p
+                local_n = local_tensor.numel()
+                slice_ = delta_gpu[offset:offset + local_n].view_as(local_tensor).to(p.dtype)
+                if g.shape != local_tensor.shape or g.dtype != p.dtype:
+                    g.data = torch.zeros(local_tensor.shape, dtype=p.dtype, device="cpu")
                 try:
                     g.data.copy_(slice_)
                 except RuntimeError as e:
                     if "DTensor" in str(e):
-                        # Handle DTensor case by assigning directly
                         g.data = slice_.detach().clone()
                     else:
                         raise e
-                # Ensure the gradient is on the same device as the parameter
-                p.grad = g.data.to(p.device)
-                offset += n
+                if (
+                    hasattr(p, "to_local")
+                    and hasattr(p, "device_mesh")
+                    and hasattr(p.device_mesh, "device_type")
+                ):
+                    grad = DTensor.from_local(
+                        slice_.to(p.device), p.device_mesh, p.placements
+                    )
+                else:
+                    grad = slice_.to(p.device)
+                p.grad = grad
+                offset += local_n
             self.prev_vector.copy_(curr_vector)
         delta_norm = delta.norm().item()
         if self.grad_clip:
@@ -143,7 +155,5 @@ class OuterOptimizer:
         self.optimizer.step()
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
-        self.optimizer.zero_grad()
-        for p in self.model.parameters():
-            p.grad = None
+        self.optimizer.zero_grad(set_to_none=False)
         return delta_norm
