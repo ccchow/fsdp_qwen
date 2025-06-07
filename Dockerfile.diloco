@@ -34,12 +34,8 @@ RUN pip install --no-cache-dir \
 # Copy framework files
 COPY diloco_fsdp_framework.py /workspace/
 COPY outer_optimizer.py /workspace/
-COPY enhanced_two_gpu_simulation.py /workspace/
-COPY docker_multi_node_training.py /workspace/
-COPY docker_compatible_framework.py /workspace/
 COPY enhanced_docker_framework.py /workspace/
 COPY dataset_utils.py /workspace/
-COPY fsdp_single_gpu.yaml /workspace/
 
 # Create necessary directories
 RUN mkdir -p /workspace/results
