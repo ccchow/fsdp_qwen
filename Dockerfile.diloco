@@ -1,0 +1,63 @@
+# Enhanced Dockerfile for Multi-Node Multi-GPU DiLoCo Training
+FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-devel
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    wget \
+    curl \
+    vim \
+    htop \
+    tmux \
+    tree \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy requirements first for better caching
+COPY requirements.txt /workspace/
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install additional dependencies for multi-node distributed training
+RUN pip install --no-cache-dir \
+    accelerate \
+    datasets \
+    transformers \
+    torch-tb-profiler \
+    tensorboard \
+    wandb \
+    deepspeed
+
+# Copy framework files
+COPY diloco_fsdp_framework.py /workspace/
+COPY outer_optimizer.py /workspace/
+COPY enhanced_two_gpu_simulation.py /workspace/
+COPY docker_multi_node_training.py /workspace/
+COPY docker_compatible_framework.py /workspace/
+COPY enhanced_docker_framework.py /workspace/
+COPY dataset_utils.py /workspace/
+COPY fsdp_single_gpu.yaml /workspace/
+
+# Create necessary directories
+RUN mkdir -p /workspace/results
+RUN mkdir -p /workspace/checkpoints
+RUN mkdir -p /workspace/logs
+
+# Set environment variables for optimal performance
+ENV PYTHONPATH=/workspace:$PYTHONPATH
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV NCCL_DEBUG=INFO
+ENV NCCL_SOCKET_IFNAME=eth0
+ENV NCCL_IB_DISABLE=1
+ENV NCCL_P2P_DISABLE=1
+
+# Set proper permissions
+RUN chmod +x /workspace/docker_multi_node_training.py
+RUN chmod +x /workspace/docker_compatible_framework.py
+RUN chmod +x /workspace/enhanced_docker_framework.py
+
+# Default entrypoint - use the enhanced framework
+ENTRYPOINT ["python", "/workspace/enhanced_docker_framework.py"]
