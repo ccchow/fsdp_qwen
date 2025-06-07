@@ -55,8 +55,6 @@ ENV NCCL_IB_DISABLE=1
 ENV NCCL_P2P_DISABLE=1
 
 # Set proper permissions
-RUN chmod +x /workspace/docker_multi_node_training.py
-RUN chmod +x /workspace/docker_compatible_framework.py
 RUN chmod +x /workspace/enhanced_docker_framework.py
 
 # Default entrypoint - use the enhanced framework
